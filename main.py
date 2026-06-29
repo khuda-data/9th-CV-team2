@@ -54,7 +54,8 @@ def _draw_debug(frame: np.ndarray, det: DetectionResult, gallery: Gallery, track
     h, w = vis.shape[:2]
     lines = []
     for tid, st in tracker._track_state.items():
-        lines.append(f"tid={tid} seat={st.last_seat or '-'}")
+        in_pending = tid in tracker._pending_new
+        lines.append(f"tid={tid} seat={st.last_seat or '-'} {'⏳' if in_pending else '✓'}")
     for i, line in enumerate(lines):
         cv2.putText(vis, line, (w - 280, 24 + i*22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100,220,255), 2)
@@ -71,7 +72,7 @@ def main() -> None:
 
     start_api(gallery, roi_path="rois.json")
 
-    LUGGAGE_INTERVAL = 8   # 짐 감지는 8프레임마다 한 번
+    LUGGAGE_INTERVAL = 4   # 짐 감지는 4프레임마다 한 번
     last_luggage: list = []
     frame_idx = 0
 
