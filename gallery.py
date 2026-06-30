@@ -27,6 +27,15 @@ class _Entry:
     luggage_items:    list           = field(default_factory=list)  # AWAY 중 감지된 짐 목록
 
 
+@dataclass
+class _SeatOnlyAway:
+    accumulated_time: float
+    last_tick:        float
+    away_since:       float
+    last_seen:        float
+    luggage_items:    list           = field(default_factory=list)
+
+
 class Gallery:
     """
     Long-term identity manager for seated café customers.
@@ -51,6 +60,7 @@ class Gallery:
     DEFAULT_ALERT_THRESHOLD       = 7200.0  # OVERDUE 기준 초 (기본 2h); TBD
     DEFAULT_NEAR_LIMIT_THRESHOLD  = 600.0   # OVERDUE 몇 초 전부터 NEAR_LIMIT
     DEFAULT_AWAY_THRESHOLD        = 300.0   # AWAY 몇 초 지속 시 AWAY_TOO_LONG
+    DEFAULT_LEFT_GRACE_THRESHOLD  = 60.0    # 물건 미감지 후 LEFT/EMPTY 전환 유예
 
     _TICK_INTERVAL = 1.0  # seconds between background accumulation ticks
 
@@ -60,16 +70,20 @@ class Gallery:
         alert_threshold:      float = DEFAULT_ALERT_THRESHOLD,
         near_limit_threshold: float = DEFAULT_NEAR_LIMIT_THRESHOLD,
         away_threshold:       float = DEFAULT_AWAY_THRESHOLD,
+        left_grace_threshold: float = DEFAULT_LEFT_GRACE_THRESHOLD,
     ) -> None:
         self.similarity_threshold = similarity_threshold
         self.alert_threshold      = alert_threshold
         self.near_limit_threshold = near_limit_threshold
         self.away_threshold       = away_threshold
+        self.left_grace_threshold = left_grace_threshold
 
         self._lock:            threading.Lock         = threading.Lock()
         self._entries:         dict[int, _Entry]      = {}  # person_id → entry
         self._track_to_person: dict[int, int]         = {}  # track_id  → person_id
         self._seat_to_persons: dict[str, list[int]]   = {}  # seat_id → [person_id, ...] (AWAY만)
+        self._seat_belongings: dict[str, list[dict]]  = {}  # seat_id → 현재 ROI 안 물건
+        self._seat_only_away: dict[str, _SeatOnlyAway] = {}  # tracklet 없는 물건-only 좌석
         self._next_person_id:  int                    = 0
         self._timer:           Optional[threading.Timer] = None
 
@@ -145,6 +159,77 @@ class Gallery:
                 # 짐 없음 → LEFT: 즉시 제거
                 self._remove(pid)
 
+    def update_tracklet_belongings(self, track_id: int, luggage_items: list[dict]) -> None:
+        """활성 SEATED tracklet의 현재 좌석 내 물건 목록을 갱신."""
+        with self._lock:
+            pid = self._track_to_person.get(track_id)
+            if pid is None:
+                return
+            e = self._entries.get(pid)
+            if e is None or e.state != State.SEATED:
+                return
+            e.luggage_items = luggage_items
+
+    def update_seat_belongings(
+        self,
+        seat_id: str,
+        luggage_items: list[dict],
+        has_person: bool = False,
+    ) -> None:
+        """좌석 ROI 안 물건 목록과 물건-only AWAY 세션을 갱신."""
+        with self._lock:
+            now = time.time()
+            self._flush_time(now)
+
+            if has_person:
+                self._seat_only_away.pop(seat_id, None)
+                if luggage_items:
+                    self._seat_belongings[seat_id] = list(luggage_items)
+                else:
+                    self._seat_belongings.pop(seat_id, None)
+                return
+
+            if luggage_items:
+                items = list(luggage_items)
+                self._seat_belongings[seat_id] = items
+
+                seat_entries = [
+                    e for e in self._entries.values()
+                    if e.last_seat == seat_id
+                ]
+                for e in seat_entries:
+                    if e.state == State.AWAY:
+                        e.luggage_items = items
+
+                if seat_entries:
+                    self._seat_only_away.pop(seat_id, None)
+                    return
+
+                st = self._seat_only_away.get(seat_id)
+                if st is None:
+                    self._seat_only_away[seat_id] = _SeatOnlyAway(
+                        accumulated_time = 0.0,
+                        last_tick        = now,
+                        away_since       = now,
+                        last_seen        = now,
+                        luggage_items    = items,
+                    )
+                else:
+                    st.last_seen = now
+                    st.luggage_items = items
+                return
+
+            st = self._seat_only_away.get(seat_id)
+            if st is None:
+                self._seat_belongings.pop(seat_id, None)
+                return
+
+            if now - st.last_seen >= self.left_grace_threshold:
+                self._seat_only_away.pop(seat_id, None)
+                self._seat_belongings.pop(seat_id, None)
+            else:
+                self._seat_belongings[seat_id] = list(st.luggage_items)
+
     def get_person_id(self, track_id: int) -> Optional[int]:
         with self._lock:
             return self._track_to_person.get(track_id)
@@ -193,7 +278,26 @@ class Gallery:
                     "awaySeconds":        round(away_secs),
                     "belongings":         list(e.luggage_items),
                 })
+            for seat_id, st in self._seat_only_away.items():
+                away_secs = now - st.away_since
+                result.append({
+                    "_seat_only":          True,
+                    "seatId":             seat_id,
+                    "occupancyState":     State.AWAY.value,
+                    "alertState":         self._compute_seat_only_alert(st, away_secs),
+                    "accumulatedSeconds": round(st.accumulated_time),
+                    "awaySeconds":        round(away_secs),
+                    "belongings":         list(st.luggage_items),
+                })
             return result
+
+    def get_seat_belongings(self) -> dict[str, list[dict]]:
+        """좌석별 현재 물건 스냅샷."""
+        with self._lock:
+            return {
+                seat_id: list(items)
+                for seat_id, items in self._seat_belongings.items()
+            }
 
     def get_alerts(self) -> list[dict]:
         """OVERDUE / AWAY_TOO_LONG 인원만 반환."""
@@ -238,6 +342,13 @@ class Gallery:
             return "AWAY_TOO_LONG" if away_secs >= self.away_threshold else "BELONGINGS_ONLY"
         return "NONE"
 
+    def _compute_seat_only_alert(self, st: "_SeatOnlyAway", away_secs: float) -> str:
+        if st.accumulated_time >= self.alert_threshold:
+            return "OVERDUE"
+        if st.accumulated_time >= self.alert_threshold - self.near_limit_threshold:
+            return "NEAR_LIMIT"
+        return "AWAY_TOO_LONG" if away_secs >= self.away_threshold else "BELONGINGS_ONLY"
+
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         denom = np.linalg.norm(a) * np.linalg.norm(b)
         return float(np.dot(a, b) / denom) if denom > 0 else 0.0
@@ -266,6 +377,9 @@ class Gallery:
             if e.state in (State.SEATED, State.AWAY):
                 e.accumulated_time += now - e.last_tick
             e.last_tick = now
+        for st in self._seat_only_away.values():
+            st.accumulated_time += now - st.last_tick
+            st.last_tick = now
 
     def _tick(self) -> None:
         with self._lock:

@@ -97,9 +97,56 @@ function formatDuration(totalSeconds) {
   return `${hours}시간 ${minutes.toString().padStart(2, "0")}분`;
 }
 
+function formatPlaybackTime(totalSeconds) {
+  const safe = Math.max(0, Number(totalSeconds) || 0);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = Math.floor(safe % 60);
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 function countByState(seats, state) {
   return seats.filter((s) => s.state === state).length;
 }
+
+const VIDEO_STATUS_DEFAULT = {
+  currentSeconds: 0,
+  durationSeconds: 0,
+  frameIndex: 0,
+  totalFrames: 0,
+  fps: 0,
+  isSeekable: false,
+  isPlaying: true,
+  imageWidth: 16,
+  imageHeight: 9,
+};
+
+const SETTINGS_FIELDS = [
+  { key: "useLimitSeconds", label: "이용 제한", unit: "초", min: 60, max: 86400, step: 60 },
+  { key: "nearLimitBeforeSeconds", label: "임박 알림", unit: "초 전", min: 0, max: 21600, step: 60 },
+  { key: "awayThresholdSeconds", label: "자리비움 알림", unit: "초", min: 30, max: 43200, step: 60 },
+  { key: "leftGraceSeconds", label: "퇴석 유예", unit: "초", min: 0, max: 3600, step: 5 },
+  { key: "personDetectionIntervalSeconds", label: "사람 탐지 주기", unit: "초", min: 1, max: 120, step: 1 },
+  { key: "tableDiffIntervalFrames", label: "테이블 비교 주기", unit: "프레임", min: 1, max: 600, step: 1 },
+  { key: "tableChangeEnterThreshold", label: "변화 진입 임계값", unit: "", min: 0, max: 1, step: 0.001 },
+  { key: "tableChangeExitThreshold", label: "변화 해제 임계값", unit: "", min: 0, max: 1, step: 0.001 },
+  { key: "tableStaticThreshold", label: "정적 판단 임계값", unit: "", min: 0, max: 1, step: 0.001 },
+  { key: "tableStaticConfirmSeconds", label: "정적 확인 시간", unit: "초", min: 0, max: 3600, step: 1 },
+  { key: "seatedPersonOverlap", label: "사람-좌석 겹침", unit: "", min: 0, max: 1, step: 0.01 },
+  { key: "seatedHipYRatio", label: "앉음 anchor 위치", unit: "", min: 0, max: 1, step: 0.01 },
+  { key: "seatedHeightWidthRatioThreshold", label: "사람 세로/가로 상한", unit: "", min: 0.5, max: 10, step: 0.05 },
+  { key: "minPersonToRoiWidthRatio", label: "사람 폭 하한", unit: "", min: 0, max: 5, step: 0.01 },
+  { key: "maxPersonToRoiHeightRatio", label: "사람 높이 상한", unit: "", min: 0.1, max: 10, step: 0.05 },
+  { key: "standingBottomExcessRatio", label: "서있는 하단 초과", unit: "", min: 0, max: 5, step: 0.01 },
+  { key: "standingHeightRatio", label: "서있는 높이 비율", unit: "", min: 0.1, max: 10, step: 0.05 },
+  { key: "identityChangeDistance", label: "임베딩 변화 거리", unit: "", min: 0, max: 2, step: 0.01 },
+  { key: "identityChangeConfirmSamples", label: "임베딩 변화 확인", unit: "회", min: 1, max: 20, step: 1 },
+  { key: "embeddingWindowSize", label: "임베딩 평균 창", unit: "개", min: 1, max: 50, step: 1 },
+  { key: "baselineImagePath", label: "Baseline 파일", unit: "", type: "text" },
+];
 
 // ── API 헬퍼 ─────────────────────────────────────────────────────────────────
 
@@ -142,6 +189,35 @@ function MetricCard({ icon, label, value, tone, helper }) {
 function SeatOverlay({ seat, selected, onSelect }) {
   const meta = STATE_META[seat.state] ?? STATE_META.empty;
   const roi  = seat.roi ?? {};
+  const polygon = Array.isArray(seat.polygon) ? seat.polygon : [];
+  if (polygon.length >= 3) {
+    const clipPath = polygonToClipPath(polygon);
+    const center = polygonCentroid(polygon);
+    return (
+      <button
+        type="button"
+        className={`seat-overlay is-polygon tone-${meta.tone} ${selected ? "is-selected" : ""}`}
+        style={{ clipPath }}
+        onClick={() => onSelect(seat.seatId)}
+        aria-label={`${seat.seatId} ${meta.label}`}
+      >
+        <span
+          className="seat-label polygon-label"
+          style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
+        >
+          {seat.seatId}
+        </span>
+        {seat.state !== "empty" && (
+          <span
+            className="seat-polygon-icon"
+            style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
+          >
+            <Icon name={meta.icon} />
+          </span>
+        )}
+      </button>
+    );
+  }
   return (
     <button
       type="button"
@@ -161,6 +237,19 @@ function SeatOverlay({ seat, selected, onSelect }) {
   );
 }
 
+function polygonToClipPath(polygon) {
+  const points = polygon.map((p) => `${(p.x * 100).toFixed(2)}% ${(p.y * 100).toFixed(2)}%`);
+  return `polygon(${points.join(", ")})`;
+}
+
+function polygonCentroid(polygon) {
+  const sum = polygon.reduce((acc, p) => ({ x: acc.x + Number(p.x || 0), y: acc.y + Number(p.y || 0) }), { x: 0, y: 0 });
+  return {
+    x: sum.x / polygon.length,
+    y: sum.y / polygon.length,
+  };
+}
+
 function SeatCard({ seat, selected, onSelect }) {
   const meta = STATE_META[seat.state] ?? STATE_META.empty;
   return (
@@ -174,7 +263,7 @@ function SeatCard({ seat, selected, onSelect }) {
         <span className={`status-chip tone-${meta.tone}`}>{meta.label}</span>
       </div>
       <p>{seat.state === "empty" ? "즉시 이용 가능" : formatDuration(seat.elapsedSeconds)}</p>
-      <small>{seat.hasBelongings ? "물건 있음" : meta.helper}</small>
+      <small>{seat.hasBelongings ? "테이블 변화" : meta.helper}</small>
       <span className="seat-card-icon"><Icon name={meta.icon} /></span>
     </button>
   );
@@ -208,21 +297,22 @@ function EventRow({ event, onConfirm }) {
 }
 
 function PolicyModal({ policy, onClose, onSave }) {
-  const [draft, setDraft] = useState({
-    limitHours:   Math.round((policy.useLimitSeconds ?? 7200) / 3600),
-    awayMinutes:  Math.round((policy.awayThresholdSeconds ?? 300) / 60),
-  });
+  const [draft, setDraft] = useState({ ...policy });
 
   const handleSave = () => {
-    onSave({
-      useLimitSeconds:      draft.limitHours  * 3600,
-      awayThresholdSeconds: draft.awayMinutes * 60,
-    });
+    onSave(draft);
+  };
+
+  const updateField = (field, value) => {
+    setDraft((prev) => ({
+      ...prev,
+      [field.key]: field.type === "text" ? value : Number(value),
+    }));
   };
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="policy-modal-title"
+      <section className="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="policy-modal-title"
         onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
@@ -232,27 +322,28 @@ function PolicyModal({ policy, onClose, onSave }) {
           <button type="button" className="icon-button" onClick={onClose}><Icon name="close" /></button>
         </div>
 
-        <label className="form-field">
-          <span>이용 제한 시간</span>
-          <div>
-            <input type="number" min="1" max="6" value={draft.limitHours}
-              onChange={(e) => setDraft((d) => ({ ...d, limitHours: Number(e.target.value) }))} />
-            <em>시간</em>
-          </div>
-        </label>
-
-        <label className="form-field">
-          <span>자리비움 판단 기준</span>
-          <div>
-            <input type="number" min="1" max="30" value={draft.awayMinutes}
-              onChange={(e) => setDraft((d) => ({ ...d, awayMinutes: Number(e.target.value) }))} />
-            <em>분</em>
-          </div>
-        </label>
+        <div className="settings-grid">
+          {SETTINGS_FIELDS.map((field) => (
+            <label className="form-field compact-field" key={field.key}>
+              <span>{field.label}</span>
+              <div>
+                <input
+                  type={field.type === "text" ? "text" : "number"}
+                  min={field.min}
+                  max={field.max}
+                  step={field.step}
+                  value={draft[field.key] ?? ""}
+                  onChange={(e) => updateField(field, e.target.value)}
+                />
+                {field.unit && <em>{field.unit}</em>}
+              </div>
+            </label>
+          ))}
+        </div>
 
         <div className="modal-note">
           <Icon name="info" />
-          사람 없음 + 물건 있음은 자리비움(AWAY), 사람 없음 + 물건 없음은 퇴석(LEFT)으로 처리합니다.
+          테이블 baseline 대비 구조 변화가 있으면 점유로 보고, 사람 탐지는 SEATED/AWAY 분기에만 사용합니다.
         </div>
 
         <div className="modal-actions">
@@ -264,12 +355,56 @@ function PolicyModal({ policy, onClose, onSave }) {
   );
 }
 
+function VideoControls({
+  status,
+  draftSeconds,
+  isDragging,
+  onDragStart,
+  onDraftChange,
+  onSeek,
+  onTogglePlayback,
+}) {
+  const duration = Number(status.durationSeconds || 0);
+  const current = isDragging ? draftSeconds : Number(status.currentSeconds || 0);
+  const seekable = Boolean(status.isSeekable) && duration > 0;
+  return (
+    <div className="video-controls">
+      <button
+        type="button"
+        className="icon-button playback-button"
+        disabled={!status.isSeekable}
+        onClick={() => onTogglePlayback(!status.isPlaying)}
+        title={status.isPlaying ? "일시정지" : "재생"}
+      >
+        <Icon name={status.isPlaying ? "pause" : "play_arrow"} />
+      </button>
+      <input
+        type="range"
+        min="0"
+        max={Math.max(duration, 1)}
+        step="0.1"
+        value={Math.min(current, Math.max(duration, 1))}
+        disabled={!seekable}
+        onMouseDown={onDragStart}
+        onTouchStart={onDragStart}
+        onChange={(e) => onDraftChange(Number(e.target.value))}
+        onMouseUp={onSeek}
+        onTouchEnd={onSeek}
+      />
+      <div className="playback-time">
+        <span>{formatPlaybackTime(current)}</span>
+        <strong>{seekable ? formatPlaybackTime(duration) : "LIVE"}</strong>
+      </div>
+    </div>
+  );
+}
+
 // ── 메인 앱 ──────────────────────────────────────────────────────────────────
 
 export function App() {
   const [seats,          setSeats]          = useState([]);
   const [events,         setEvents]         = useState([]);
-  const [policy,         setPolicy]         = useState({ useLimitSeconds: 7200, awayThresholdSeconds: 300 });
+  const [policy,         setPolicy]         = useState({ useLimitSeconds: 10800, awayThresholdSeconds: 1800 });
   const [selectedId,     setSelectedId]     = useState(null);
   const [isPolicyOpen,   setIsPolicyOpen]   = useState(false);
   const [isGalleryOpen,  setIsGalleryOpen]  = useState(false);
@@ -277,6 +412,11 @@ export function App() {
   const [now,            setNow]            = useState(new Date());
   const [seatSnapshots,  setSeatSnapshots]  = useState([]);
   const [lightboxSrc,    setLightboxSrc]    = useState(null);
+  const [cameraLayout,   setCameraLayout]   = useState({ imageWidth: 16, imageHeight: 9 });
+  const [videoStatus,    setVideoStatus]    = useState(VIDEO_STATUS_DEFAULT);
+  const [draftSeconds,   setDraftSeconds]   = useState(0);
+  const [isSeeking,      setIsSeeking]      = useState(false);
+  const [streamNonce,    setStreamNonce]    = useState(0);
   const wsRef   = useRef(null);
   const tickRef = useRef(null);
 
@@ -301,15 +441,49 @@ export function App() {
 
   // 초기 데이터 로드
   useEffect(() => {
-    apiFetch("/api/dashboard")
-      .then((data) => {
+    Promise.all([
+      apiFetch("/api/dashboard"),
+      apiFetch("/api/seats/layout").catch(() => null),
+      apiFetch("/api/video/status").catch(() => null),
+    ])
+      .then(([data, layout, video]) => {
         setSeats(normSeats(data.seats ?? []));
         setEvents(data.events ?? []);
         setPolicy(data.settings ?? policy);
+        if (layout?.imageWidth && layout?.imageHeight) {
+          setCameraLayout({
+            imageWidth: layout.imageWidth,
+            imageHeight: layout.imageHeight,
+          });
+        }
+        if (video) {
+          setVideoStatus({ ...VIDEO_STATUS_DEFAULT, ...video });
+          if (!isSeeking) setDraftSeconds(video.currentSeconds ?? 0);
+          if (video.imageWidth && video.imageHeight) {
+            setCameraLayout({ imageWidth: video.imageWidth, imageHeight: video.imageHeight });
+          }
+        }
         if (data.seats?.length > 0) setSelectedId(data.seats[0].seatId);
       })
       .catch(console.error);
   }, []);
+
+  useEffect(() => {
+    const refreshVideoStatus = () => {
+      apiFetch("/api/video/status")
+        .then((video) => {
+          setVideoStatus({ ...VIDEO_STATUS_DEFAULT, ...video });
+          if (!isSeeking) setDraftSeconds(video.currentSeconds ?? 0);
+          if (video.imageWidth && video.imageHeight) {
+            setCameraLayout({ imageWidth: video.imageWidth, imageHeight: video.imageHeight });
+          }
+        })
+        .catch(() => {});
+    };
+    refreshVideoStatus();
+    const timer = setInterval(refreshVideoStatus, 1000);
+    return () => clearInterval(timer);
+  }, [isSeeking]);
 
   // WebSocket 연결
   const connectWs = useCallback(() => {
@@ -378,6 +552,48 @@ export function App() {
     setIsPolicyOpen(false);
   };
 
+  const refreshDashboard = useCallback(() => {
+    apiFetch("/api/dashboard")
+      .then((data) => {
+        setSeats(normSeats(data.seats ?? []));
+        setEvents(data.events ?? []);
+        setPolicy(data.settings ?? policy);
+      })
+      .catch(() => {});
+  }, [policy]);
+
+  const handleSeek = async () => {
+    if (!videoStatus.isSeekable) {
+      setIsSeeking(false);
+      return;
+    }
+    try {
+      const status = await apiFetch("/api/video/seek", {
+        method: "POST",
+        body: JSON.stringify({ seconds: draftSeconds }),
+      });
+      setVideoStatus({ ...VIDEO_STATUS_DEFAULT, ...status });
+      setStreamNonce((n) => n + 1);
+      refreshDashboard();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSeeking(false);
+    }
+  };
+
+  const handleTogglePlayback = async (isPlaying) => {
+    try {
+      const status = await apiFetch("/api/video/playback", {
+        method: "POST",
+        body: JSON.stringify({ isPlaying }),
+      });
+      setVideoStatus({ ...VIDEO_STATUS_DEFAULT, ...status });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // 좌석 선택 시 스냅샷 조회
   const handleSelectSeat = useCallback((seatId) => {
     setSelectedId(seatId);
@@ -432,7 +648,7 @@ export function App() {
       <section className="metric-grid" aria-label="좌석 상태 요약">
         <MetricCard icon="chair"    label="전체 좌석" value={seats.length}               tone="gray"  />
         <MetricCard icon="person"   label="이용 중"   value={countByState(seats,"seated")} tone="green" helper="정상 이용" />
-        <MetricCard icon="work"     label="자리비움"  value={countByState(seats,"away")}   tone="blue"  helper="물건 감지" />
+        <MetricCard icon="work"     label="자리비움"  value={countByState(seats,"away")}   tone="blue"  helper="테이블 변화" />
         <MetricCard icon="timer"    label="시간초과"  value={countByState(seats,"overdue")} tone="red"   helper="추가 확인 필요" />
         <article className="policy-summary">
           <p>운영 정책 요약</p>
@@ -452,11 +668,16 @@ export function App() {
               <h2>매장 전체 카메라</h2>
               <p>좌석 ROI와 탐지 상태를 실시간으로 표시합니다.</p>
             </div>
-            <div className="live-chip"><span />실시간</div>
+            <div className={`live-chip ${videoStatus.isSeekable ? "recorded" : ""}`}>
+              <span />{videoStatus.isSeekable ? "녹화 영상" : "실시간"}
+            </div>
           </div>
 
-          <div className="camera-frame">
-            <img src="/api/cameras/main/stream" alt="카페 CCTV 실시간 영상"
+          <div
+            className="camera-frame"
+            style={{ aspectRatio: `${cameraLayout.imageWidth} / ${cameraLayout.imageHeight}` }}
+          >
+            <img src={`/api/cameras/main/stream?v=${streamNonce}`} alt="카페 CCTV 실시간 영상"
               onError={(e) => { e.target.src = "/cafe-camera-fallback.png"; }} />
             <div className="camera-shade" />
             {seats.map((seat) => (
@@ -472,6 +693,15 @@ export function App() {
               <span className="legend-item tone-gray">비어있음</span>
             </div>
           </div>
+          <VideoControls
+            status={videoStatus}
+            draftSeconds={draftSeconds}
+            isDragging={isSeeking}
+            onDragStart={() => setIsSeeking(true)}
+            onDraftChange={setDraftSeconds}
+            onSeek={handleSeek}
+            onTogglePlayback={handleTogglePlayback}
+          />
         </section>
 
         {/* 좌석 현황 */}
@@ -575,10 +805,13 @@ export function App() {
                 <dt>판단 기준</dt>
                 <dd>
                   {selectedSeat.state === "empty"   ? "사람 없음 + 물건 없음" :
-                   selectedSeat.state === "away"    ? "사람 없음 + 물건 있음" :
-                                                      "사람 탐지 + 좌석 ROI 겹침"}
+                   selectedSeat.state === "away"    ? "사람 없음 + 테이블 변화 유지" :
+                                                      "사람 탐지 + 폴리곤 ROI 겹침"}
                 </dd>
               </div>
+              <div><dt>테이블 변화 점수</dt><dd>{Number(selectedSeat.tableChangeScore ?? 0).toFixed(3)}</dd></div>
+              <div><dt>테이블 정적 시간</dt><dd>{formatDuration(selectedSeat.tableStaticSeconds)}</dd></div>
+              <div><dt>인원 변경 후보</dt><dd>{selectedSeat.identityChangeCount ?? 0}회</dd></div>
             </dl>
 
             <div className={`recommendation tone-${selectedMeta.tone}`}>
@@ -636,7 +869,12 @@ function normSeats(raw) {
     ...s,
     // roi가 없으면 빈 객체 (SeatOverlay에서 방어 처리)
     roi:            s.roi ?? {},
+    polygon:        s.polygon ?? [],
     elapsedSeconds: s.elapsedSeconds ?? s.accumulatedSeconds ?? 0,
     belongings:     s.belongings ?? [],
+    tableChanged:   s.tableChanged ?? false,
+    tableChangeScore: s.tableChangeScore ?? 0,
+    tableStaticSeconds: s.tableStaticSeconds ?? 0,
+    identityChangeCount: s.identityChangeCount ?? 0,
   }));
 }

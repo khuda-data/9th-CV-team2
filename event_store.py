@@ -143,6 +143,11 @@ class EventStore:
         with self._lock:
             return sum(1 for e in self._events if e.status == "UNCONFIRMED")
 
+    def reset(self) -> None:
+        with self._lock:
+            self._events.clear()
+            self._pending.clear()
+
 
 def _to_dict(e: _Event) -> dict:
     return {

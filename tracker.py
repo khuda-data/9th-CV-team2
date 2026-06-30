@@ -20,15 +20,31 @@ import numpy as np
 from detector import DetectionResult, Box, belonging_meta
 from gallery import Gallery
 import snapshot_store
+from roi_utils import RoiConfig
 
 # BoT-SORT track_buffer 기본값(30)보다 크게 설정해 refind과 충돌 방지
 _LOST_PATIENCE = 45  # frames; should be >= BoT-SORT track_buffer
+_SEATED_CONFIRM_FRAMES = 2
+_OFF_SEAT_PATIENCE = 18
+_EMBED_INTERVAL_FRAMES = 24
+_SEATED_PERSON_OVERLAP = 0.12
+_SEATED_HIP_Y_RATIO = 0.62
+_SEATED_HEIGHT_WIDTH_RATIO_THRESHOLD = 2.35
+_MIN_PERSON_TO_ROI_WIDTH_RATIO = 0.28
+_MAX_PERSON_TO_ROI_HEIGHT_RATIO = 1.75
+_STANDING_BOTTOM_EXCESS_RATIO = 0.18
+_STANDING_HEIGHT_RATIO = 1.05
+_LUGGAGE_LOST_CONFIRM_FRAMES = 30
 
 
 
 @dataclass
 class _TrackState:
-    last_seat: Optional[str]
+    last_seat: Optional[str] = None
+    candidate_seat: Optional[str] = None
+    candidate_frames: int = 0
+    off_seat_frames: int = 0
+    last_embedding_frame: int = -10**9
 
 
 class Tracker:
@@ -54,15 +70,19 @@ class Tracker:
 
         # gallery.on_lost_tracklet(has_luggage=True) 후 짐 감시 대상 좌석
         self._away_seats: set[str] = set()
+        self._away_missing_frames: dict[str, int] = {}
         self._last_raw_tracks = []
+        self._frame_idx = 0
 
     # ── 외부 인터페이스 ───────────────────────────────────────────────────
 
     def update(self, frame: np.ndarray, detections: DetectionResult) -> None:
         """매 프레임 main.py가 호출."""
+        self._frame_idx += 1
         raw_tracks = self._run_botsort(frame, detections.person_boxes)
         self._last_raw_tracks = raw_tracks
         active_ids: set[int] = set()
+        occupied_seats: set[str] = set()
 
         # ── 1. 활성 track 처리 ──────────────────────────────────────────
         for row in raw_tracks:
@@ -70,12 +90,31 @@ class Tracker:
             xyxy = row[:4]
             active_ids.add(tid)
 
-            seat = self._find_seat(xyxy)
+            seat = self._find_seated_seat(xyxy)
 
             if tid not in self._track_state:
-                self._track_state[tid] = _TrackState(last_seat=seat)
-            elif seat:
-                self._track_state[tid].last_seat = seat
+                self._track_state[tid] = _TrackState()
+            st = self._track_state[tid]
+
+            confirmed_seat = self._update_seated_candidate(st, seat)
+            if confirmed_seat:
+                st.last_seat = confirmed_seat
+                st.off_seat_frames = 0
+                occupied_seats.add(confirmed_seat)
+                boxes = self._luggage_boxes_in_seat(seat, detections.luggage_boxes)
+                if self._gallery.get_person_id(tid) is None:
+                    self._pending_new.add(tid)
+                else:
+                    self._gallery.update_tracklet_belongings(tid, _boxes_to_belongings(boxes))
+                    self._maybe_update_embedding(frame, tid, st)
+            elif st.last_seat and self._gallery.get_person_id(tid) is not None:
+                st.off_seat_frames += 1
+                if st.off_seat_frames >= _OFF_SEAT_PATIENCE:
+                    self._emit_seat_departure(tid, st.last_seat, detections)
+                    st.last_seat = None
+                    st.candidate_seat = None
+                    st.candidate_frames = 0
+                    st.off_seat_frames = 0
 
             # ── 2. 신규 tracklet ────────────────────────────────────────
             if tid not in self._seen_ids:
@@ -83,6 +122,8 @@ class Tracker:
                 self._pending_new.add(tid)
 
             self._lost_cands.pop(tid, None)
+
+        self._update_all_seat_belongings(detections.luggage_boxes, occupied_seats)
 
         # ── 3. pending_new → seat 확보 시 크롭에서 임베딩 추출 후 등록 ──
         for tid in list(self._pending_new):
@@ -98,6 +139,9 @@ class Tracker:
             self._away_seats.discard(st.last_seat)
             self._gallery.on_new_tracklet(tid, emb, st.last_seat)
             self._pending_new.discard(tid)
+            st.last_embedding_frame = self._frame_idx
+            boxes = self._luggage_boxes_in_seat(st.last_seat, detections.luggage_boxes)
+            self._gallery.update_tracklet_belongings(tid, _boxes_to_belongings(boxes))
 
             pid = self._gallery.get_person_id(tid)
             if pid is not None and crop is not None:
@@ -119,22 +163,19 @@ class Tracker:
 
             st = self._track_state.get(tid)
             if st and st.last_seat:
-                boxes = self._luggage_boxes_in_seat(st.last_seat, detections.luggage_boxes)
-                items = _boxes_to_belongings(boxes)
-                # LEFT(짐 없음) 시 스냅샷 삭제
-                if not items:
-                    pid = self._gallery.get_person_id(tid)
-                    if pid is not None:
-                        snapshot_store.remove(pid)
-                self._gallery.on_lost_tracklet(tid, items)
-                if items:
-                    self._away_seats.add(st.last_seat)
+                self._emit_seat_departure(tid, st.last_seat, detections)
 
         # ── 5. AWAY 좌석 짐 소멸 감지 ───────────────────────────────────
         for seat_id in list(self._away_seats):
             if not self._luggage_in_seat(seat_id, detections.luggage_boxes):
-                self._away_seats.discard(seat_id)
-                self._gallery.on_luggage_lost(seat_id)
+                missing = self._away_missing_frames.get(seat_id, 0) + 1
+                self._away_missing_frames[seat_id] = missing
+                if missing >= _LUGGAGE_LOST_CONFIRM_FRAMES:
+                    self._away_seats.discard(seat_id)
+                    self._away_missing_frames.pop(seat_id, None)
+                    self._gallery.on_luggage_lost(seat_id)
+            else:
+                self._away_missing_frames.pop(seat_id, None)
 
     # ── 내부 헬퍼 ────────────────────────────────────────────────────────
 
@@ -166,32 +207,93 @@ class Tracker:
         except Exception:
             return None
 
-    def _find_seat(self, xyxy: np.ndarray, overlap_thresh: float = 0.15) -> Optional[str]:
-        """사람 bbox와 ROI의 겹침 비율이 가장 높은 좌석 반환.
+    def _find_seated_seat(self, xyxy: np.ndarray) -> Optional[str]:
+        """사람이 좌석 ROI 안에 앉아 있다고 볼 수 있는 좌석 반환.
 
-        단일 점 판별 대신 면적 겹침 비율을 써서 앵글·왜곡에 강인하게 대응.
-        overlap_thresh: 사람 bbox 면적 중 ROI와 겹치는 비율 최솟값.
+        현재 모델은 pose를 쓰지 않으므로, bbox 기준 휴리스틱을 사용한다.
+        - lower-torso anchor가 ROI 안에 있어야 한다.
+        - bbox가 ROI와 충분히 겹쳐야 한다.
+        - bbox 세로/가로 비율이 임계값 이하이어야 한다.
+        - ROI보다 지나치게 작은/큰 사람 bbox는 앉은 사람 후보에서 제외한다.
         """
         px1, py1, px2, py2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
         p_area = max((px2 - px1) * (py2 - py1), 1e-6)
+        p_w = max(px2 - px1, 1e-6)
+        p_h = max(py2 - py1, 1e-6)
+        h_w_ratio = p_h / p_w
+        anchor = ((px1 + px2) / 2, py1 + p_h * _SEATED_HIP_Y_RATIO)
 
-        best_seat, best_ratio = None, overlap_thresh
+        best_seat, best_ratio = None, _SEATED_PERSON_OVERLAP
         for seat_id, polygon in self._seat_rois.items():
-            # 폴리곤 → 바운딩 박스
             pts = polygon.reshape(-1, 2)
             rx1, ry1 = float(pts[:, 0].min()), float(pts[:, 1].min())
             rx2, ry2 = float(pts[:, 0].max()), float(pts[:, 1].max())
+            roi_w = max(rx2 - rx1, 1e-6)
+            roi_h = max(ry2 - ry1, 1e-6)
 
-            # 교집합 면적
             ix1, iy1 = max(px1, rx1), max(py1, ry1)
             ix2, iy2 = min(px2, rx2), min(py2, ry2)
             inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
 
             ratio = inter / p_area
+            if ratio < best_ratio:
+                continue
+            if cv2.pointPolygonTest(polygon, anchor, False) < 0:
+                continue
+            if h_w_ratio > _SEATED_HEIGHT_WIDTH_RATIO_THRESHOLD:
+                continue
+            if p_w < roi_w * _MIN_PERSON_TO_ROI_WIDTH_RATIO:
+                continue
+            if p_h > roi_h * _MAX_PERSON_TO_ROI_HEIGHT_RATIO:
+                continue
+            if (
+                py2 > ry2 + roi_h * _STANDING_BOTTOM_EXCESS_RATIO
+                and p_h > roi_h * _STANDING_HEIGHT_RATIO
+            ):
+                continue
+
             if ratio > best_ratio:
                 best_ratio, best_seat = ratio, seat_id
 
         return best_seat
+
+    def _update_seated_candidate(
+        self, st: _TrackState, seat: Optional[str]
+    ) -> Optional[str]:
+        if seat is None:
+            st.candidate_seat = None
+            st.candidate_frames = 0
+            return None
+        if st.candidate_seat == seat:
+            st.candidate_frames += 1
+        else:
+            st.candidate_seat = seat
+            st.candidate_frames = 1
+        return seat if st.candidate_frames >= _SEATED_CONFIRM_FRAMES else None
+
+    def _maybe_update_embedding(self, frame: np.ndarray, tid: int, st: _TrackState) -> None:
+        if self._frame_idx - st.last_embedding_frame < _EMBED_INTERVAL_FRAMES:
+            return
+        crop = self._crop_person(frame, tid)
+        emb = self._embed_crop(crop) if crop is not None else None
+        if emb is None:
+            return
+        self._gallery.update_embedding(tid, emb)
+        st.last_embedding_frame = self._frame_idx
+
+    def _emit_seat_departure(
+        self, tid: int, seat_id: str, detections: DetectionResult
+    ) -> None:
+        boxes = self._luggage_boxes_in_seat(seat_id, detections.luggage_boxes)
+        items = _boxes_to_belongings(boxes)
+        if not items:
+            pid = self._gallery.get_person_id(tid)
+            if pid is not None:
+                snapshot_store.remove(pid)
+        self._gallery.on_lost_tracklet(tid, items)
+        if items:
+            self._away_seats.add(seat_id)
+            self._away_missing_frames.pop(seat_id, None)
 
     def _crop_person(self, frame: np.ndarray, tid: int) -> np.ndarray | None:
         """현재 프레임에서 해당 track의 사람 크롭 반환."""
@@ -226,6 +328,19 @@ class Tracker:
     def _luggage_in_seat(self, seat_id: str, luggage_boxes: list[Box]) -> bool:
         return bool(self._luggage_boxes_in_seat(seat_id, luggage_boxes))
 
+    def _update_all_seat_belongings(
+        self,
+        luggage_boxes: list[Box],
+        occupied_seats: set[str],
+    ) -> None:
+        for seat_id in self._seat_rois:
+            boxes = self._luggage_boxes_in_seat(seat_id, luggage_boxes)
+            self._gallery.update_seat_belongings(
+                seat_id,
+                _boxes_to_belongings(boxes),
+                has_person=seat_id in occupied_seats,
+            )
+
 
 # ── 모듈 레벨 팩토리 ─────────────────────────────────────────────────────
 
@@ -237,16 +352,8 @@ def _boxes_to_belongings(boxes: list[Box]) -> list[dict]:
 
 
 def _load_rois(path: str) -> dict[str, np.ndarray]:
-    p = Path(path)
-    if not p.exists():
-        return {}
-    with open(p) as f:
-        data = json.load(f)
-    # 각 좌석: [[x,y], ...] → (N,1,2) int32 (pointPolygonTest 요구 형식)
-    return {
-        k: np.array(v, dtype=np.int32).reshape(-1, 1, 2)
-        for k, v in data.items()
-    }
+    config = RoiConfig.load(path)
+    return config.pixel_polygons(config.source_width, config.source_height)
 
 
 def _build_botsort(reid_weights: str, device: str):

@@ -16,11 +16,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -30,8 +28,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from gallery import Gallery
 from event_store import EventStore
+from roi_utils import RoiConfig
+from runtime_config import RuntimeSettings
 import snapshot_store
 
 KST = timezone(timedelta(hours=9))
@@ -45,51 +44,41 @@ def _now_iso() -> str:
 
 class FrameBuffer:
     def __init__(self) -> None:
-        self._lock  = threading.Lock()
-        self._frame: Optional[np.ndarray] = None
+        self._lock          = threading.Lock()
+        self._raw_frame:    Optional[np.ndarray] = None
+        self._overlay_frame: Optional[np.ndarray] = None
+        self._image_width = 0
+        self._image_height = 0
 
-    def push(self, frame: np.ndarray) -> None:
+    def push(self, frame: np.ndarray, overlay_frame: Optional[np.ndarray] = None) -> None:
         with self._lock:
-            self._frame = frame.copy()
+            self._raw_frame = frame.copy()
+            self._image_height, self._image_width = frame.shape[:2]
+            self._overlay_frame = (
+                overlay_frame.copy()
+                if overlay_frame is not None
+                else self._raw_frame.copy()
+            )
 
-    def get(self) -> Optional[np.ndarray]:
+    def get(self, overlay: bool = False) -> Optional[np.ndarray]:
         with self._lock:
-            return self._frame
+            frame = self._overlay_frame if overlay else self._raw_frame
+            return None if frame is None else frame.copy()
+
+    def size(self, fallback_w: int = 1280, fallback_h: int = 720) -> tuple[int, int]:
+        with self._lock:
+            return (
+                self._image_width or fallback_w,
+                self._image_height or fallback_h,
+            )
 
 
 _frame_buffer = FrameBuffer()
 
 
-def push_frame(frame: np.ndarray) -> None:
+def push_frame(frame: np.ndarray, overlay_frame: Optional[np.ndarray] = None) -> None:
     """main.py가 매 프레임 호출."""
-    _frame_buffer.push(frame)
-
-
-# ── ROI 로딩 ─────────────────────────────────────────────────────────────────
-
-def _load_seat_config(roi_path: str, img_w: int = 1280, img_h: int = 720) -> dict[str, dict]:
-    """rois.json → seatId → {seatId, label, roi(정규화 bbox)}"""
-    p = Path(roi_path)
-    if not p.exists():
-        return {}
-    with open(p) as f:
-        data = json.load(f)
-    seats = {}
-    for seat_id, polygon in data.items():
-        pts = np.array(polygon, dtype=float)
-        x1, y1 = pts.min(axis=0)
-        x2, y2 = pts.max(axis=0)
-        seats[seat_id] = {
-            "seatId": seat_id,
-            "label":  seat_id,
-            "roi": {
-                "x":      round(x1 / img_w, 4),
-                "y":      round(y1 / img_h, 4),
-                "width":  round((x2 - x1) / img_w, 4),
-                "height": round((y2 - y1) / img_h, 4),
-            },
-        }
-    return seats
+    _frame_buffer.push(frame, overlay_frame)
 
 
 # ── 추천 문구 ─────────────────────────────────────────────────────────────────
@@ -127,21 +116,43 @@ def _computed_state(occ: str, alert: str) -> str:
 _ALERT_PRIORITY = {"OVERDUE": 4, "NEAR_LIMIT": 3, "AWAY_TOO_LONG": 2, "BELONGINGS_ONLY": 1, "NONE": 0}
 
 
+def _merge_belongings(items: list[dict], extra_items: list[dict]) -> list[dict]:
+    merged: dict[tuple[str, str], dict] = {}
+    for item in [*items, *extra_items]:
+        key = (str(item.get("type", "")), str(item.get("label", "")))
+        previous = merged.get(key)
+        if previous is None or item.get("confidence", 0.0) > previous.get("confidence", 0.0):
+            merged[key] = item
+    return list(merged.values())
+
+
+def _apply_seat_belongings(seat: dict, belongings: list[dict]) -> dict:
+    if not belongings or seat["occupancyState"] == "EMPTY":
+        return seat
+
+    merged = _merge_belongings(seat.get("belongings", []), belongings)
+    seat["belongings"] = merged
+    seat["hasBelongings"] = bool(merged)
+
+    return seat
+
+
 def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
     """같은 좌석의 여러 gallery entry → 단일 API 응답으로 집계."""
     if not entries:
         return _build_seat(seat_cfg, None)
 
     # 점유 상태: SEATED 우선
-    occs = [e["occupancyState"] for e in entries]
-    occ  = "SEATED" if "SEATED" in occs else "AWAY"
+    seated_entries = [e for e in entries if e["occupancyState"] == "SEATED"]
+    state_entries = seated_entries or entries
+    occ = "SEATED" if seated_entries else "AWAY"
 
-    # 가장 심각한 alert
-    alert = max(entries, key=lambda e: _ALERT_PRIORITY.get(e["alertState"], 0))["alertState"]
+    # 사람이 앉아 있으면 seat-only AWAY/BELONGINGS_ONLY 알림은 좌석 대표 알림에서 제외한다.
+    alert = max(state_entries, key=lambda e: _ALERT_PRIORITY.get(e["alertState"], 0))["alertState"]
 
-    # 가장 오래 앉은 사람 기준
-    max_acc  = max(e["accumulatedSeconds"] for e in entries)
-    max_away = max(e["awaySeconds"]        for e in entries)
+    # 가장 오래 점유한 세션 기준
+    max_acc  = max(e["accumulatedSeconds"] for e in state_entries)
+    max_away = 0 if seated_entries else max(e["awaySeconds"] for e in state_entries)
 
     # 짐 합산 (중복 제거)
     seen, all_belongings = set(), []
@@ -161,11 +172,15 @@ def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
         "accumulatedSeconds": max_acc,
         "elapsedSeconds":     max_acc,
         "awaySeconds":        max_away,
-        "personCount":        len(entries),
-        "hasPerson":          occ == "SEATED",
-        "hasBelongings":      bool(all_belongings) or occ == "AWAY",
+        "personCount":        sum(1 for e in entries if not e.get("_seat_only")),
+        "hasPerson":          any(e.get("hasPerson") for e in entries) or occ == "SEATED",
+        "hasBelongings":      any(e.get("hasBelongings") for e in entries) or bool(all_belongings) or occ == "AWAY",
         "belongings":         all_belongings,
-        "confidence":         {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0},
+        "confidence":         _best_confidence(entries),
+        "tableChanged":       any(e.get("tableChanged", False) for e in entries),
+        "tableChangeScore":   max((float(e.get("tableChangeScore", 0.0)) for e in entries), default=0.0),
+        "tableStaticSeconds": max((int(e.get("tableStaticSeconds", 0)) for e in entries), default=0),
+        "identityChangeCount": max((int(e.get("identityChangeCount", 0)) for e in entries), default=0),
         "recommendation":     _RECOMMENDATIONS.get(alert, ""),
         "updatedAt":          _now_iso(),
     }
@@ -182,10 +197,15 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
             "accumulatedSeconds": 0,
             "elapsedSeconds":     0,                    # 목업 호환 alias
             "awaySeconds":        0,
+            "personCount":        0,
             "hasPerson":          False,
             "hasBelongings":      False,
             "belongings":         [],
             "confidence":         {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0},
+            "tableChanged":       False,
+            "tableChangeScore":   0.0,
+            "tableStaticSeconds": 0,
+            "identityChangeCount": 0,
             "recommendation":     "",
             "updatedAt":          _now_iso(),
         }
@@ -203,13 +223,27 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
         "accumulatedSeconds": acc,
         "elapsedSeconds":     acc,
         "awaySeconds":        gallery_entry["awaySeconds"],
-        "hasPerson":          occ == "SEATED",
-        "hasBelongings":      bool(gallery_entry.get("belongings")),
+        "personCount":        1,
+        "hasPerson":          gallery_entry.get("hasPerson", occ == "SEATED"),
+        "hasBelongings":      gallery_entry.get("hasBelongings", bool(gallery_entry.get("belongings"))),
         "belongings":         gallery_entry.get("belongings", []),
-        "confidence":         {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0},
+        "confidence":         gallery_entry.get("confidence", {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0}),
+        "tableChanged":       gallery_entry.get("tableChanged", False),
+        "tableChangeScore":   gallery_entry.get("tableChangeScore", 0.0),
+        "tableStaticSeconds": gallery_entry.get("tableStaticSeconds", 0),
+        "identityChangeCount": gallery_entry.get("identityChangeCount", 0),
         "recommendation":     _RECOMMENDATIONS.get(alert, ""),
         "updatedAt":          _now_iso(),
     }
+
+
+def _best_confidence(entries: list[dict]) -> dict:
+    best = {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0}
+    for entry in entries:
+        confidence = entry.get("confidence") or {}
+        for key in best:
+            best[key] = max(float(best[key]), float(confidence.get(key, 0.0)))
+    return {key: round(value, 3) for key, value in best.items()}
 
 
 def _build_summary(seats: list[dict], unconfirmed: int) -> dict:
@@ -224,18 +258,34 @@ def _build_summary(seats: list[dict], unconfirmed: int) -> dict:
     }
 
 
+def _current_size(camera, fallback_w: int, fallback_h: int) -> tuple[int, int]:
+    frame_w, frame_h = _frame_buffer.size(fallback_w, fallback_h)
+    if frame_w and frame_h:
+        return frame_w, frame_h
+    try:
+        width, height = camera.size
+        return width or fallback_w, height or fallback_h
+    except Exception:
+        return fallback_w, fallback_h
+
+
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 
 def start_api(
-    gallery:  Gallery,
+    state_store,
+    settings_store: RuntimeSettings,
+    camera,
     roi_path: str = "rois.json",
     host:     str = "0.0.0.0",
     port:     int = 8000,
     img_w:    int = 1280,
     img_h:    int = 720,
+    on_reset=None,
 ) -> None:
     """백그라운드 daemon 스레드로 FastAPI 서버 실행."""
-    app          = _build_app(gallery, roi_path, img_w, img_h)
+    roi_config = RoiConfig.load(roi_path, img_w, img_h)
+    app = _build_app(state_store, settings_store, camera, roi_config, img_w, img_h, on_reset)
+
     def _run():
         try:
             uvicorn.run(app, host=host, port=port, log_level="info")
@@ -247,15 +297,16 @@ def start_api(
 
 
 def _build_app(
-    gallery:  Gallery,
-    roi_path: str,
+    state_store,
+    settings_store: RuntimeSettings,
+    camera,
+    roi_config: RoiConfig,
     img_w:    int,
     img_h:    int,
+    on_reset=None,
 ) -> FastAPI:
     app          = FastAPI(title="Cafe Seat Monitor")
     events       = EventStore()
-    settings     = dict(_DEFAULT_SETTINGS)
-    seat_configs = _load_seat_config(roi_path, img_w, img_h)
     ws_clients:  list[WebSocket] = []
     prev_states: dict[str, str]  = {}   # seatId → occupancyState (이벤트 전이 감지용)
 
@@ -269,14 +320,20 @@ def _build_app(
     # ── 내부 헬퍼 ────────────────────────────────────────────────────────
 
     def _all_seats() -> list[dict]:
+        width, height = _current_size(camera, img_w, img_h)
+        seat_configs = roi_config.layout(width, height)
         # 좌석별로 여러 entry 그룹화
         seat_entries: dict[str, list] = {}
-        for e in gallery.get_status():
+        for e in state_store.get_status():
             seat_entries.setdefault(e["seatId"], []).append(e)
-        return [
-            _aggregate_seat(cfg, seat_entries.get(sid, []))
-            for sid, cfg in seat_configs.items()
-        ]
+        seat_belongings = state_store.get_seat_belongings()
+        seats = []
+        for sid, cfg in seat_configs.items():
+            entries = seat_entries.get(sid, [])
+            seat = _aggregate_seat(cfg, entries)
+            seat = _apply_seat_belongings(seat, seat_belongings.get(sid, []))
+            seats.append(seat)
+        return seats
 
     def _detect_events(seats: list[dict]) -> None:
         """상태 전이 감지 → 이벤트 생성."""
@@ -325,7 +382,7 @@ def _build_app(
         return {
             "status": "ok",
             "serverTime": _now_iso(),
-            "model": {"detector": "YOLOv8", "tracker": "BoT-SORT", "reid": "OSNet"},
+            "model": {"detector": "YOLOE-26S-Seg", "state": "SeatStateEngine", "reid": "OSNet/fallback"},
         }
 
     @app.get("/api/dashboard")
@@ -335,7 +392,7 @@ def _build_app(
         return {
             "serverTime": _now_iso(),
             "summary":    _build_summary(seats, events.count_unconfirmed()),
-            "settings":   settings,
+            "settings":   settings_store.snapshot(),
             "seats":      seats,
             "events":     events.get_events(limit=20),
         }
@@ -349,28 +406,29 @@ def _build_app(
 
     @app.get("/api/seats/layout")
     def get_layout():
+        width, height = _current_size(camera, img_w, img_h)
+        seat_configs = roi_config.layout(width, height)
         return {
             "cameraId":    "main",
-            "imageWidth":  img_w,
-            "imageHeight": img_h,
+            "imageWidth":  width,
+            "imageHeight": height,
             "seats": [
-                {"seatId": cfg["seatId"], "label": cfg["label"], "roi": cfg["roi"]}
+                {"seatId": cfg["seatId"], "label": cfg["label"], "roi": cfg["roi"], "polygon": cfg.get("polygon", [])}
                 for cfg in seat_configs.values()
             ],
         }
 
     @app.get("/api/seats/{seat_id}")
     def get_seat(seat_id: str):
-        cfg = seat_configs.get(seat_id)
-        if cfg is None:
+        seat_map = {s["seatId"]: s for s in _all_seats()}
+        if seat_id not in seat_map:
             raise HTTPException(
                 status_code=404,
                 detail={"error": {"code": "INVALID_SEAT_ID",
                                   "message": "존재하지 않는 좌석입니다.",
                                   "details": {"seatId": seat_id}}},
             )
-        gallery_map = {e["seatId"]: e for e in gallery.get_status()}
-        return {"seat": _build_seat(cfg, gallery_map.get(seat_id))}
+        return {"seat": seat_map[seat_id]}
 
     @app.get("/api/events")
     def get_events(
@@ -404,28 +462,53 @@ def _build_app(
 
     @app.get("/api/settings")
     def get_settings():
-        return {"settings": settings}
+        return {"settings": settings_store.snapshot()}
 
     @app.patch("/api/settings")
     def patch_settings(body: dict):
-        allowed = set(_DEFAULT_SETTINGS.keys())
-        for k, v in body.items():
-            if k in allowed:
-                settings[k] = v
-                # gallery 런타임 임계값 동기화
-                if k == "useLimitSeconds":
-                    gallery.alert_threshold = float(v)
-                elif k == "nearLimitBeforeSeconds":
-                    gallery.near_limit_threshold = float(v)
-                elif k == "awayThresholdSeconds":
-                    gallery.away_threshold = float(v)
-        return {"settings": settings}
+        try:
+            return {"settings": settings_store.patch(body)}
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "INVALID_SETTING", "message": str(exc)}},
+            ) from exc
+
+    @app.get("/api/video/status")
+    def video_status():
+        status = camera.status()
+        width, height = _current_size(camera, img_w, img_h)
+        status["imageWidth"] = width
+        status["imageHeight"] = height
+        return status
+
+    @app.post("/api/video/seek")
+    def video_seek(body: dict):
+        seconds = float(body.get("seconds", 0.0))
+        try:
+            status = camera.seek(seconds)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"code": "SOURCE_NOT_SEEKABLE", "message": str(exc)}},
+            ) from exc
+        state_store.reset()
+        snapshot_store.clear()
+        events.reset()
+        prev_states.clear()
+        if on_reset is not None:
+            on_reset()
+        return status
+
+    @app.post("/api/video/playback")
+    def video_playback(body: dict):
+        return camera.set_playing(bool(body.get("isPlaying", True)))
 
     # ── MJPEG 스트림 ─────────────────────────────────────────────────────
 
     def _mjpeg_generator(overlay: bool):
         while True:
-            frame = _frame_buffer.get()
+            frame = _frame_buffer.get(overlay=overlay)
             if frame is None:
                 time.sleep(0.05)
                 continue
@@ -522,15 +605,3 @@ def _build_app(
         asyncio.create_task(_ws_broadcaster())
 
     return app
-
-
-# ── 기본값 ────────────────────────────────────────────────────────────────────
-
-_DEFAULT_SETTINGS: dict = {
-    "useLimitSeconds":        7200,
-    "nearLimitBeforeSeconds": 600,
-    "awayThresholdSeconds":   300,
-    "leftGraceSeconds":       60,
-    "minSeatIou":             0.35,
-    "eventDebounceSeconds":   10,
-}

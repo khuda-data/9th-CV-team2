@@ -3,11 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.venv/
+.cache/
 
 # 모델 가중치 (용량 큼 — 실행 시 자동 다운로드)
 *.pt
 *.pth
 *.onnx
+mobileclip2_b.ts
 
 # 영상 데이터
 *.mp4
@@ -17,6 +20,7 @@ __pycache__/
 
 # 좌석 ROI (환경마다 다름)
 rois.json
+baseline_empty.jpg
 
 # 스냅샷 캐시
 snapshots/
