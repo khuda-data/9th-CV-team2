@@ -45,17 +45,12 @@ class TableChangeDetector:
 
         h, w = frame.shape[:2]
         table_polygons = self._roi_config.table_pixel_polygons(w, h)
-        seat_polygons = self._roi_config.seat_pixel_polygons(w, h)
 
         result: dict[str, TableChange] = {}
         for seat_id, table_polygon in table_polygons.items():
-            seat_polygon = seat_polygons.get(seat_id, table_polygon)
-            # 테이블 면과 좌석(의자) 영역 중 더 크게 변한 쪽을 채택한다.
-            # 짐이 테이블이 아니라 의자 위에 놓이는 경우도 감지하기 위함.
-            # 점유 판정은 색상 히스토그램 유사도로 고정한다 (조명/노이즈에 픽셀 diff보다 안정적).
-            table_score = _histogram_diff_score(frame, baseline, table_polygon, (h, w))
-            seat_score = _histogram_diff_score(frame, baseline, seat_polygon, (h, w))
-            score = max(table_score, seat_score)
+            # 점유 판정은 tablePolygon의 조명 보정 후 구조 변화 면적만 사용한다.
+            # seatPolygon은 사람 bbox 겹침 판정에만 쓰며, 테이블 변화 점수에는 섞지 않는다.
+            score = _structural_change_score(frame, baseline, table_polygon, (h, w))
 
             previous_score = self._last_scores.get(seat_id, score)
             static = abs(score - previous_score) <= static_threshold
@@ -74,8 +69,8 @@ class TableChangeDetector:
     def region_crops(self, seat_id: str, frame: np.ndarray) -> dict | None:
         """좌석의 초기(baseline)/현재 '테이블' 영역 크롭 + 여러 유사도 지표를 반환.
 
-        occupancy_score: 실제 SEATED/AWAY 판정에 쓰인 점수(테이블/좌석 중 큰 diff,
-        _last_scores). metrics: 테이블 영역만으로 계산한 참고용 유사도 후보들.
+        occupancy_score: 실제 SEATED/AWAY 판정에 쓰인 tablePolygon 구조 변화 점수.
+        metrics: 테이블 영역만으로 계산한 참고용 유사도 후보들.
         """
         h, w = frame.shape[:2]
         table_polygon = self._roi_config.table_pixel_polygons(w, h).get(seat_id)
@@ -97,6 +92,7 @@ class TableChangeDetector:
             "current_crop": current_crop,
             "occupancy_score": float(self._last_scores.get(seat_id, 0.0)),
             "metrics": {
+                "structural": 1.0 - _structural_change_score(current_crop, baseline_crop, mask_crop),
                 "pixel": _pixel_similarity(current_crop, baseline_crop, mask_crop),
                 "ssim": _ssim_similarity(current_crop, baseline_crop, mask_crop),
                 "edge": _edge_similarity(current_crop, baseline_crop, mask_crop),
@@ -114,23 +110,71 @@ class TableChangeDetector:
         return cv2.resize(self._baseline, (width, height), interpolation=cv2.INTER_AREA)
 
 
-def _histogram_diff_score(
+def _structural_change_score(
     current: np.ndarray,
     baseline: np.ndarray,
-    polygon: np.ndarray,
-    shape: tuple[int, int],
+    polygon_or_mask: np.ndarray,
+    shape: tuple[int, int] | None = None,
 ) -> float:
-    x1, y1, x2, y2 = bbox_from_polygon(polygon)
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-    mask = mask_for_polygon(shape, polygon)
-    mask_crop = mask[y1 : y2 + 1, x1 : x2 + 1] > 0
+    if shape is None:
+        current_crop = current
+        baseline_crop = baseline
+        mask_crop = polygon_or_mask.astype(bool)
+    else:
+        polygon = polygon_or_mask
+        x1, y1, x2, y2 = bbox_from_polygon(polygon)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        mask = mask_for_polygon(shape, polygon)
+        mask_crop = mask[y1 : y2 + 1, x1 : x2 + 1] > 0
+        current_crop = current[y1 : y2 + 1, x1 : x2 + 1]
+        baseline_crop = baseline[y1 : y2 + 1, x1 : x2 + 1]
+
     if not mask_crop.any():
         return 0.0
-    current_crop = current[y1 : y2 + 1, x1 : x2 + 1]
-    baseline_crop = baseline[y1 : y2 + 1, x1 : x2 + 1]
-    similarity = _histogram_similarity(current_crop, baseline_crop, mask_crop)
-    return float(np.clip(1.0 - similarity, 0.0, 1.0))
+
+    current_gray = _normalized_gray(current_crop)
+    baseline_gray = _normalized_gray(baseline_crop)
+    diff = cv2.absdiff(current_gray, baseline_gray)
+
+    changed = (diff > 28) & mask_crop
+    changed = cv2.morphologyEx(
+        changed.astype(np.uint8),
+        cv2.MORPH_OPEN,
+        np.ones((3, 3), dtype=np.uint8),
+    ).astype(bool)
+
+    mask_area = max(int(mask_crop.sum()), 1)
+    area_ratio = changed.sum() / mask_area
+    mean_delta = diff[mask_crop].mean() / 255.0
+
+    # Glossy tabletops can create wide, fragmented edge movement under lighting changes.
+    # A real belonging usually appears as one or more connected changed components.
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+        changed.astype(np.uint8),
+        8,
+    )
+    component_areas = stats[1:, cv2.CC_STAT_AREA] if num_labels > 1 else np.array([])
+    min_component_area = max(30, int(mask_area * 0.012))
+    significant_components = component_areas[component_areas >= min_component_area]
+    significant_ratio = (
+        significant_components.sum() / mask_area
+        if significant_components.size
+        else 0.0
+    )
+    largest_ratio = (
+        component_areas.max() / mask_area
+        if component_areas.size
+        else 0.0
+    )
+
+    score = max(
+        float(significant_ratio) * 1.8,
+        float(largest_ratio) * 2.0,
+        float(area_ratio) * 0.35,
+        float(mean_delta) * 0.7,
+    )
+    return float(np.clip(score, 0.0, 1.0))
 
 
 # ── 좌석 상세 화면용 참고 유사도 지표들 (occupancy 판정에는 관여하지 않음) ──────────
@@ -149,6 +193,13 @@ def _edge_similarity(current: np.ndarray, baseline: np.ndarray, mask_crop: np.nd
     baseline_edges = _edge_features(baseline)
     diff = np.abs(current_edges - baseline_edges)
     return float(np.clip(1.0 - diff[mask_crop].mean(), 0.0, 1.0))
+
+
+def _edge_change_ratio(current_gray: np.ndarray, baseline_gray: np.ndarray, mask_crop: np.ndarray) -> float:
+    current_edges = cv2.Canny(current_gray, 50, 120)
+    baseline_edges = cv2.Canny(baseline_gray, 50, 120)
+    changed = (cv2.absdiff(current_edges, baseline_edges) > 0) & mask_crop
+    return float(changed.sum() / max(mask_crop.sum(), 1))
 
 
 def _histogram_similarity(current: np.ndarray, baseline: np.ndarray, mask_crop: np.ndarray) -> float:
@@ -199,3 +250,10 @@ def _edge_features(frame: np.ndarray) -> np.ndarray:
     magnitude = cv2.magnitude(grad_x, grad_y)
     _, magnitude = cv2.threshold(magnitude, 25, 255, cv2.THRESH_TOZERO)
     return cv2.normalize(magnitude, None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+
+def _normalized_gray(frame: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    normalized = clahe.apply(gray)
+    return cv2.GaussianBlur(normalized, (5, 5), 0)

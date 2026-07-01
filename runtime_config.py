@@ -6,17 +6,16 @@ from typing import Any
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "useLimitSeconds": 10800,
+    "useLimitSeconds": 1800,
     "nearLimitBeforeSeconds": 600,
-    "awayThresholdSeconds": 1800,
+    "awayThresholdSeconds": 600,
     "eventDebounceSeconds": 10,
     "personDetectionIntervalSeconds": 10,
-    "tableDiffIntervalFrames": 6,
-    "tableChangeEnterThreshold": 0.06,  # 유사도 94% 미만이면 점유로 판정
-    "tableChangeExitThreshold": 0.06,
+    "tableDiffIntervalSeconds": 10,
+    "tableChangeEnterThreshold": 0.18,
+    "tableChangeExitThreshold": 0.10,
     "tableStaticThreshold": 0.012,
-    "tableStaticConfirmSeconds": 10,
-    "seatedPersonOverlap": 0.12,
+    "seatedPersonAnchorThreshold": 0.8,
     "identityChangeDistance": 0.35,
     "identityChangeConfirmSamples": 2,
     "embeddingWindowSize": 5,
@@ -36,12 +35,11 @@ SETTING_RULES: dict[str, SettingRule] = {
     "awayThresholdSeconds": SettingRule(int, 30, 12 * 3600),
     "eventDebounceSeconds": SettingRule(int, 0, 3600),
     "personDetectionIntervalSeconds": SettingRule(float, 1, 120),
-    "tableDiffIntervalFrames": SettingRule(int, 1, 600),
+    "tableDiffIntervalSeconds": SettingRule(float, 1, 600),
     "tableChangeEnterThreshold": SettingRule(float, 0, 1),
     "tableChangeExitThreshold": SettingRule(float, 0, 1),
     "tableStaticThreshold": SettingRule(float, 0, 1),
-    "tableStaticConfirmSeconds": SettingRule(float, 0, 3600),
-    "seatedPersonOverlap": SettingRule(float, 0, 1),
+    "seatedPersonAnchorThreshold": SettingRule(float, 0, 1),
     "identityChangeDistance": SettingRule(float, 0, 2),
     "identityChangeConfirmSamples": SettingRule(int, 1, 20),
     "embeddingWindowSize": SettingRule(int, 1, 50),
@@ -66,6 +64,8 @@ class RuntimeSettings:
     def patch(self, updates: dict[str, Any]) -> dict[str, Any]:
         validated: dict[str, Any] = {}
         for key, value in updates.items():
+            if key == "seatedPersonOverlap":
+                key = "seatedPersonAnchorThreshold"
             rule = SETTING_RULES.get(key)
             if rule is None:
                 continue

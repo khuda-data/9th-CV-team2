@@ -49,14 +49,14 @@ def main() -> None:
 
     frame_idx = 0
     next_person_detection_at = 0.0
-    last_detections = DetectionResult(person_boxes=[], luggage_boxes=[])
+    last_detections = DetectionResult(person_boxes=[])
 
     try:
         while True:
             if reset_event.is_set():
                 frame_idx = 0
                 next_person_detection_at = 0.0
-                last_detections = DetectionResult(person_boxes=[], luggage_boxes=[])
+                last_detections = DetectionResult(person_boxes=[])
                 reset_event.clear()
 
             if not camera.is_playing:

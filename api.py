@@ -139,7 +139,7 @@ def _apply_seat_belongings(seat: dict, belongings: list[dict]) -> dict:
 
 
 def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
-    """같은 좌석의 여러 gallery entry → 단일 API 응답으로 집계."""
+    """같은 좌석의 여러 상태 entry → 단일 API 응답으로 집계."""
     if not entries:
         return _build_seat(seat_cfg, None)
 
@@ -167,6 +167,7 @@ def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
     return {
         **seat_cfg,
         "id":                 seat_cfg["seatId"],
+        "sessionId":          state_entries[0].get("sessionId"),
         "state":              _computed_state(occ, alert),
         "occupancyState":     occ,
         "alertState":         alert,
@@ -182,6 +183,7 @@ def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
         "tableChangeScore":   max((float(e.get("tableChangeScore", 0.0)) for e in entries), default=0.0),
         "tableStaticSeconds": max((int(e.get("tableStaticSeconds", 0)) for e in entries), default=0),
         "identityChangeCount": max((int(e.get("identityChangeCount", 0)) for e in entries), default=0),
+        "identityEvidenceCount": max((int(e.get("identityEvidenceCount", 0)) for e in entries), default=0),
         "recommendation":     _RECOMMENDATIONS.get(alert, ""),
         "updatedAt":          _now_iso(),
     }
@@ -192,6 +194,7 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
         return {
             **seat_cfg,
             "id":                 seat_cfg["seatId"],   # 목업 호환 alias
+            "sessionId":          None,
             "state":              "empty",
             "occupancyState":     "EMPTY",
             "alertState":         "NONE",
@@ -207,6 +210,7 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
             "tableChangeScore":   0.0,
             "tableStaticSeconds": 0,
             "identityChangeCount": 0,
+            "identityEvidenceCount": 0,
             "recommendation":     "",
             "updatedAt":          _now_iso(),
         }
@@ -218,6 +222,7 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
     return {
         **seat_cfg,
         "id":                 seat_cfg["seatId"],
+        "sessionId":          gallery_entry.get("sessionId"),
         "state":              _computed_state(occ, alert),
         "occupancyState":     occ,
         "alertState":         alert,
@@ -233,6 +238,7 @@ def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
         "tableChangeScore":   gallery_entry.get("tableChangeScore", 0.0),
         "tableStaticSeconds": gallery_entry.get("tableStaticSeconds", 0),
         "identityChangeCount": gallery_entry.get("identityChangeCount", 0),
+        "identityEvidenceCount": gallery_entry.get("identityEvidenceCount", 0),
         "recommendation":     _RECOMMENDATIONS.get(alert, ""),
         "updatedAt":          _now_iso(),
     }
@@ -465,18 +471,57 @@ def _build_app(
 
     @app.get("/api/seats/{seat_id}/snapshot")
     def get_seat_snapshot(seat_id: str):
-        snaps = snapshot_store.get_by_seat(seat_id)
+        active_entry = next(
+            (entry for entry in state_store.get_status() if entry["seatId"] == seat_id),
+            None,
+        )
+        if active_entry is None or not active_entry.get("sessionId"):
+            raise HTTPException(status_code=404, detail="현재 점유 세션 없음")
+        snaps = snapshot_store.get_by_session(active_entry["sessionId"])
         if not snaps:
-            raise HTTPException(status_code=404, detail="스냅샷 없음")
+            raise HTTPException(status_code=404, detail="현재 세션 인원 변경 스냅샷 없음")
         return {"snapshots": snaps}
 
+    @app.post("/api/seats/{seat_id}/session-start")
+    def set_session_start_from_snapshot(seat_id: str, body: dict):
+        snapshot_id = str(body.get("snapshotId", "")).strip()
+        if not snapshot_id:
+            raise HTTPException(status_code=400, detail="snapshotId가 필요합니다.")
+
+        snapshot = snapshot_store.get(snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="스냅샷을 찾을 수 없습니다.")
+        if snapshot.get("seatId") != seat_id:
+            raise HTTPException(status_code=409, detail="해당 좌석의 스냅샷이 아닙니다.")
+
+        active_entry = next(
+            (entry for entry in state_store.get_status() if entry["seatId"] == seat_id),
+            None,
+        )
+        if active_entry is None or not active_entry.get("sessionId"):
+            raise HTTPException(status_code=404, detail="현재 점유 세션 없음")
+        if snapshot.get("sessionId") != active_entry.get("sessionId"):
+            raise HTTPException(status_code=409, detail="현재 점유 세션의 스냅샷이 아닙니다.")
+
+        ok = state_store.rebase_session_start(
+            seat_id,
+            active_entry["sessionId"],
+            float(snapshot.get("capturedEpoch", time.time())),
+        )
+        if not ok:
+            raise HTTPException(status_code=409, detail="세션 시작 시점을 변경할 수 없습니다.")
+
+        seat = next((s for s in _all_seats() if s["seatId"] == seat_id), None)
+        return {"seat": seat, "snapshot": snapshot}
+
     _METRIC_LABELS = {
+        "structural": "구조 변화",
         "pixel":     "픽셀 차이",
         "ssim":      "SSIM (구조적 유사도)",
         "edge":      "엣지(질감) 비교",
         "histogram": "색상 히스토그램",
     }
-    _OCCUPANCY_METRIC_KEY = "histogram"  # 점유 판정에 실제로 쓰는 지표
+    _OCCUPANCY_METRIC_KEY = "structural"  # 점유 판정에 실제로 쓰는 지표
 
     @app.get("/api/seats/{seat_id}/table-state")
     def get_table_state(seat_id: str):
@@ -496,14 +541,14 @@ def _build_app(
             "seatId": seat_id,
             "baselineImage": _encode(regions["baseline_crop"]),
             "currentImage": _encode(regions["current_crop"]),
-            # 실제 SEATED/AWAY 판정에 쓰인 값 (테이블/좌석 중 더 크게 변한 쪽, 색상 히스토그램 기반)
+            # 실제 SEATED/AWAY 판정에 쓰인 tablePolygon 구조 변화 점수
             "occupancyScore": round(occupancy_score, 4),
             "occupancySimilarity": round(max(0.0, 1.0 - occupancy_score), 4),
-            # 참고용 지표들 (테이블 영역만 비교). histogram이 실제 판정 지표와 같은 계열이다.
+            # 참고용 지표들. structural이 실제 점유 판정 지표다.
             "metrics": [
                 {
                     "key": key,
-                    "label": _METRIC_LABELS[key],
+                    "label": _METRIC_LABELS.get(key, key),
                     "similarity": round(value, 4),
                     "isOccupancyMetric": key == _OCCUPANCY_METRIC_KEY,
                 }
@@ -543,9 +588,9 @@ def _build_app(
                 status_code=409,
                 detail={"error": {"code": "SOURCE_NOT_SEEKABLE", "message": str(exc)}},
             ) from exc
-        # 갤러리(snapshot_store)는 영상 탐색과 무관하게 계속 누적되어야 하므로 지우지 않는다.
         state_store.reset()
         events.reset()
+        snapshot_store.clear()
         prev_states.clear()
         if on_reset is not None:
             on_reset()
@@ -613,9 +658,12 @@ def _build_app(
                 for s in seats:
                     sid = s["seatId"]
                     sig = (
+                        s.get("sessionId"),
                         s["occupancyState"],
                         s["alertState"],
                         str(s.get("belongings")),   # 짐 목록 변화도 감지
+                        s.get("identityChangeCount", 0),
+                        s.get("identityEvidenceCount", 0),
                     )
                     if prev_sig.get(sid) != sig:
                         prev_sig[sid] = sig

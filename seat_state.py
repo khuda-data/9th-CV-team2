@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from detector import Box, DetectionResult
-from roi_utils import RoiConfig, bbox_from_polygon
+from roi_utils import RoiConfig
 from runtime_config import RuntimeSettings
 from table_change import TableChangeDetector
 import snapshot_store
@@ -33,7 +33,7 @@ class _SeatState:
     embedding_window: list[np.ndarray] = field(default_factory=list)
     identity_candidate_count: int = 0
     identity_change_count: int = 0
-    session_snapshot_saved: bool = False
+    identity_evidence_count: int = 0
 
 
 class SeatStateEngine:
@@ -55,6 +55,7 @@ class SeatStateEngine:
         }
         self._session_seq = 0
         self._last_table_changes = {}
+        self._last_table_evaluated_at: Optional[float] = None
         self._last_frame_shape: tuple[int, int] = (0, 0)
 
     def update(
@@ -70,8 +71,15 @@ class SeatStateEngine:
         self._last_frame_shape = (w, h)
         settings = self._settings.snapshot()
 
-        if frame_index % int(settings["tableDiffIntervalFrames"]) == 0 or not self._last_table_changes:
+        table_interval = float(settings["tableDiffIntervalSeconds"])
+        should_evaluate_table = (
+            not self._last_table_changes
+            or self._last_table_evaluated_at is None
+            or now - self._last_table_evaluated_at >= table_interval
+        )
+        if should_evaluate_table:
             self._last_table_changes = self._table_detector.evaluate(frame)
+            self._last_table_evaluated_at = now
 
         seated_people = (
             self._find_seated_people(frame, detections.person_boxes, settings)
@@ -96,6 +104,8 @@ class SeatStateEngine:
             if person_sample:
                 if person_match is not None:
                     box, match_score = person_match
+                    if state.session_id is None:
+                        self._start_session(state, now)
                     state.last_person_seen_at = now
                     state.has_person = True
                     state.person_confidence = float(box.confidence)
@@ -111,6 +121,7 @@ class SeatStateEngine:
     def reset(self) -> None:
         self._table_detector.reset()
         self._last_table_changes = {}
+        self._last_table_evaluated_at = None
         self._states = {
             seat_id: _SeatState(seat_id=seat_id)
             for seat_id in self._roi_config.seat_ids()
@@ -144,6 +155,7 @@ class SeatStateEngine:
                 })
             result.append({
                 "seatId": state.seat_id,
+                "sessionId": state.session_id,
                 "occupancyState": state.occupancy_state,
                 "alertState": alert,
                 "accumulatedSeconds": round(accumulated),
@@ -155,6 +167,7 @@ class SeatStateEngine:
                 "tableChangeScore": state.table_change_score,
                 "tableStaticSeconds": round(state.table_static_seconds),
                 "identityChangeCount": state.identity_change_count,
+                "identityEvidenceCount": state.identity_evidence_count,
                 "confidence": {
                     "personDetection": round(state.person_confidence, 3),
                     "belongingsDetection": round(float(state.table_change_score), 3),
@@ -180,42 +193,58 @@ class SeatStateEngine:
             if row["alertState"] in ("OVERDUE", "AWAY_TOO_LONG")
         ]
 
+    def rebase_session_start(
+        self,
+        seat_id: str,
+        session_id: str,
+        started_at: float,
+    ) -> bool:
+        state = self._states.get(seat_id)
+        if (
+            state is None
+            or state.session_id != session_id
+            or state.occupied_since is None
+        ):
+            return False
+
+        now = time.time()
+        state.occupied_since = min(float(started_at), now)
+        if state.away_since is not None and state.away_since < state.occupied_since:
+            state.away_since = state.occupied_since
+        return True
+
     def _advance_state(
         self,
         state: _SeatState,
         now: float,
         settings: dict,
     ) -> None:
-        if not state.table_changed:
-            # 유사도가 회복되어 baseline과 다시 비슷해지면 유예 없이 즉시 EMPTY 처리한다.
-            if state.occupancy_state != "EMPTY":
-                self._clear_session(state)
-            return
-
-        state.empty_since = None
-        if state.session_id is None:
-            self._start_session(state, now)
-
         person_recent = (
             state.last_person_seen_at is not None
             and now - state.last_person_seen_at
-            <= float(settings["personDetectionIntervalSeconds"]) * 1.5
+            <= float(settings["personDetectionIntervalSeconds"]) * 2.5
         )
         if person_recent:
+            if state.session_id is None:
+                self._start_session(state, now)
             state.occupancy_state = "SEATED"
             state.away_since = None
             state.has_person = True
             return
 
-        static_confirmed = (
-            state.table_static_seconds
-            >= float(settings["tableStaticConfirmSeconds"])
-        )
-        if static_confirmed or state.occupancy_state != "SEATED":
-            if state.away_since is None:
-                state.away_since = now
-            state.occupancy_state = "AWAY"
-            state.has_person = False
+        if not state.table_changed:
+            # 사람도 없고 테이블 변화도 baseline 수준이면 좌석은 비어 있다고 본다.
+            if state.occupancy_state != "EMPTY":
+                self._clear_session(state)
+            return
+
+        if state.session_id is None:
+            self._start_session(state, now)
+
+        if state.away_since is None:
+            state.away_since = now
+        state.occupancy_state = "AWAY"
+        state.has_person = False
 
     def _start_session(self, state: _SeatState, now: float) -> None:
         self._session_seq += 1
@@ -225,9 +254,11 @@ class SeatStateEngine:
         state.embedding_window = []
         state.identity_candidate_count = 0
         state.identity_change_count = 0
-        state.session_snapshot_saved = False
+        state.identity_evidence_count = 0
 
     def _clear_session(self, state: _SeatState) -> None:
+        if state.session_id is not None:
+            snapshot_store.delete_by_session(state.session_id)
         state.occupancy_state = "EMPTY"
         state.session_id = None
         state.occupied_since = None
@@ -238,7 +269,8 @@ class SeatStateEngine:
         state.seat_match = 0.0
         state.embedding_window = []
         state.identity_candidate_count = 0
-        state.session_snapshot_saved = False
+        state.identity_change_count = 0
+        state.identity_evidence_count = 0
 
     def _compute_alert(
         self,
@@ -247,14 +279,14 @@ class SeatStateEngine:
         away_seconds: float,
     ) -> str:
         settings = self._settings.snapshot()
-        if accumulated >= float(settings["useLimitSeconds"]):
-            return "OVERDUE"
-        if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
-            return "NEAR_LIMIT"
         if state.occupancy_state == "AWAY":
             if away_seconds >= float(settings["awayThresholdSeconds"]):
                 return "AWAY_TOO_LONG"
             return "BELONGINGS_ONLY"
+        if accumulated >= float(settings["useLimitSeconds"]):
+            return "OVERDUE"
+        if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
+            return "NEAR_LIMIT"
         return "NONE"
 
     def _find_seated_people(
@@ -266,9 +298,9 @@ class SeatStateEngine:
         h, w = frame.shape[:2]
         polygons = self._roi_config.seat_pixel_polygons(w, h)
         result: dict[str, tuple[Box, float]] = {}
-        min_overlap = float(settings["seatedPersonOverlap"])
+        min_score = float(settings["seatedPersonAnchorThreshold"])
         for box in boxes:
-            seat_id, score = _find_box_seat(box.xyxy, polygons, settings, min_overlap)
+            seat_id, score = _find_box_seat(box.xyxy, polygons, min_score)
             if seat_id is None:
                 continue
             previous = result.get(seat_id)
@@ -293,8 +325,6 @@ class SeatStateEngine:
         window_size = int(self._settings.get("embeddingWindowSize", 5))
         if not state.embedding_window:
             state.embedding_window.append(embedding)
-            self._save_snapshot(state, crop, frame, "SESSION_STARTED", 0.0)
-            state.session_snapshot_saved = True
             return
 
         mean_embedding = np.mean(np.stack(state.embedding_window), axis=0)
@@ -303,9 +333,13 @@ class SeatStateEngine:
             state.identity_candidate_count += 1
             if state.identity_candidate_count >= int(self._settings.get("identityChangeConfirmSamples", 2)):
                 state.identity_change_count += 1
+                state.identity_evidence_count += 1
                 state.identity_candidate_count = 0
                 state.embedding_window = [embedding]
-                self._save_snapshot(state, crop, frame, "IDENTITY_CHANGE", distance)
+                self._save_snapshot(state, crop, frame, "IDENTITY_CHANGE", distance, now)
+            else:
+                state.identity_evidence_count += 1
+                self._save_snapshot(state, crop, frame, "IDENTITY_CANDIDATE", distance, now)
             return
 
         state.identity_candidate_count = 0
@@ -320,6 +354,7 @@ class SeatStateEngine:
         frame: np.ndarray,
         reason: str,
         identity_distance: float,
+        captured_epoch: float,
     ) -> None:
         if state.session_id is None:
             return
@@ -330,6 +365,7 @@ class SeatStateEngine:
             crop=crop,
             full_frame=frame,
             identity_distance=round(float(identity_distance), 4),
+            captured_epoch=captured_epoch,
         )
 
 
@@ -369,22 +405,30 @@ class _PersonEmbedder:
 def _find_box_seat(
     xyxy: np.ndarray,
     polygons: dict[str, np.ndarray],
-    settings: dict,
-    min_overlap: float,
+    min_score: float,
 ) -> tuple[Optional[str], float]:
     px1, py1, px2, py2 = map(float, xyxy)
-    p_area = max((px2 - px1) * (py2 - py1), 1e-6)
+    person_height = max(py2 - py1, 1.0)
+    center_x = float((px1 + px2) / 2.0)
+    hip_point = (center_x, float(py1 + person_height * 0.72))
+    bottom_center = (float((px1 + px2) / 2.0), float(py2))
 
-    best_seat, best_ratio = None, min_overlap
+    best_seat, best_score = None, 0.0
     for seat_id, polygon in polygons.items():
-        rx1, ry1, rx2, ry2 = bbox_from_polygon(polygon)
-        ix1, iy1 = max(px1, rx1), max(py1, ry1)
-        ix2, iy2 = min(px2, rx2), min(py2, ry2)
-        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-        ratio = inter / p_area
-        if ratio > best_ratio:
-            best_seat, best_ratio = seat_id, ratio
-    return best_seat, float(best_ratio)
+        polygon_points = polygon.reshape(-1, 2).astype(np.float32)
+        hip_inside = cv2.pointPolygonTest(polygon_points, hip_point, False) >= 0
+        foot_inside = cv2.pointPolygonTest(
+            polygon_points,
+            bottom_center,
+            False,
+        ) >= 0
+        score = 1.0 if hip_inside else 0.6 if foot_inside else 0.0
+        if score > best_score:
+            best_seat, best_score = seat_id, score
+
+    if best_score < min_score:
+        return None, float(best_score)
+    return best_seat, float(best_score)
 
 
 def _crop_box(frame: np.ndarray, xyxy: np.ndarray) -> Optional[np.ndarray]:

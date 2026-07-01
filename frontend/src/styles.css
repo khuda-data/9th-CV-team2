@@ -216,6 +216,17 @@ button:disabled {
   font-weight: 800;
 }
 
+.snapshot-action {
+  margin-top: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .header-button b {
   display: grid;
   min-width: 22px;
@@ -320,22 +331,25 @@ button:disabled {
 .dashboard-grid {
   display: grid;
   grid-template-areas:
-    "camera seats"
-    "log detail";
+    "main seats"
+    "main detail";
   grid-template-columns: minmax(0, 1.85fr) minmax(380px, 0.95fr);
+  grid-template-rows: auto auto;
   gap: 18px;
+  align-items: start;
 }
 
-.camera-panel {
-  grid-area: camera;
+.dashboard-main-column {
+  display: flex;
+  grid-area: main;
+  min-width: 0;
+  flex-direction: column;
+  gap: 18px;
+  align-items: stretch;
 }
 
 .seats-panel {
   grid-area: seats;
-}
-
-.log-panel {
-  grid-area: log;
 }
 
 .detail-panel {
@@ -357,15 +371,17 @@ button:disabled {
 }
 
 .camera-panel {
-  min-height: 512px;
+  width: 100%;
+  min-height: 0;
 }
 
 .seats-panel {
-  min-height: 512px;
+  min-height: 0;
+  align-self: start;
 }
 
 .log-panel {
-  align-self: start;
+  width: 100%;
 }
 
 .detail-panel {
@@ -440,7 +456,7 @@ button:disabled {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: fill;
   filter: saturate(0.9) contrast(0.96);
 }
 
@@ -1159,9 +1175,16 @@ tbody tr:last-child td {
     grid-template-columns: 1fr 1fr;
   }
 
+  .dashboard-grid {
+    grid-template-areas:
+      "main main"
+      "seats seats"
+      "detail detail";
+    grid-template-rows: auto auto auto;
+  }
+
   .policy-summary,
-  .camera-panel,
-  .log-panel {
+  .dashboard-main-column {
     grid-column: 1 / -1;
   }
 
@@ -1315,13 +1338,13 @@ tbody tr:last-child td {
   }
 
   .dashboard-grid {
-    min-height: calc(100vh - 166px);
+    min-height: 0;
     grid-template-areas:
-      "camera seats detail"
-      "log seats detail";
-    grid-template-columns: minmax(520px, 1.42fr) minmax(305px, 0.78fr) minmax(300px, 0.72fr);
-    grid-template-rows: minmax(0, 1fr) 144px;
+      "main seats detail";
+    grid-template-columns: minmax(560px, 1.55fr) minmax(300px, 0.72fr) minmax(320px, 0.78fr);
+    grid-template-rows: auto;
     gap: 12px;
+    align-items: start;
   }
 
   .camera-panel,
@@ -1336,6 +1359,10 @@ tbody tr:last-child td {
   .camera-panel {
     display: flex;
     flex-direction: column;
+  }
+
+  .dashboard-main-column {
+    gap: 12px;
   }
 
   .panel-header,
@@ -1358,7 +1385,7 @@ tbody tr:last-child td {
   }
 
   .camera-frame {
-    flex: 1;
+    flex: 0 0 auto;
     height: auto;
     min-height: 0;
     border-radius: 15px;
@@ -1585,6 +1612,27 @@ tbody tr:last-child td {
   }
 }
 
+@media (max-width: 1180px) {
+  .metric-grid,
+  .dashboard-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-areas:
+      "main main"
+      "seats seats"
+      "detail detail";
+    grid-template-rows: auto auto auto;
+  }
+
+  .policy-summary,
+  .dashboard-main-column,
+  .detail-panel {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 760px) {
   .app-shell {
     padding: 14px;
@@ -1595,6 +1643,14 @@ tbody tr:last-child td {
   .dashboard-grid,
   .seat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-areas:
+      "main"
+      "seats"
+      "detail";
+    grid-template-rows: auto;
   }
 
   .top-actions {
@@ -1617,12 +1673,11 @@ tbody tr:last-child td {
   }
 
   .camera-frame {
-    height: 330px;
+    height: auto;
   }
 
   .camera-legend {
-    position: static;
-    border-radius: 0;
+    border-radius: 12px;
   }
 
   th:nth-child(5),
