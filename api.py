@@ -106,13 +106,17 @@ _EVENT_MESSAGES = {
 # ── Seat 응답 조립 ────────────────────────────────────────────────────────────
 
 def _computed_state(occ: str, alert: str) -> str:
-    """프론트엔드 단일 state 필드 (목업 호환)."""
+    """프론트엔드 단일 state 필드 (목업 호환).
+
+    표시 우선순위: 비어있음 > 시간초과 > 마감임박 > 장기간부재/자리비움 > 이용중.
+    시간초과·마감임박은 자리비움 여부와 무관하게 최우선 표시한다.
+    """
     if occ == "EMPTY":              return "empty"
+    if alert == "OVERDUE":          return "overdue"
+    if alert == "NEAR_LIMIT":       return "near"
     if occ == "AWAY":
         if alert == "AWAY_TOO_LONG": return "away_long"
         return "away"
-    if alert == "OVERDUE":          return "overdue"
-    if alert == "NEAR_LIMIT":       return "near"
     return "seated"
 
 

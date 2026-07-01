@@ -278,15 +278,20 @@ class SeatStateEngine:
         accumulated: float,
         away_seconds: float,
     ) -> str:
+        """표시 우선순위: 시간초과 > 마감임박 > 장기간부재/자리비움 > 없음.
+
+        누적 이용시간은 SEATED·AWAY 모두 흐르므로, 자리비움 중이어도 이용시간
+        초과/임박 여부를 먼저 검사한다. 자리비움 관련 알림은 그 둘 다 아닐 때만 본다.
+        """
         settings = self._settings.snapshot()
-        if state.occupancy_state == "AWAY":
-            if away_seconds >= float(settings["awayThresholdSeconds"]):
-                return "AWAY_TOO_LONG"
-            return "BELONGINGS_ONLY"
         if accumulated >= float(settings["useLimitSeconds"]):
             return "OVERDUE"
         if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
             return "NEAR_LIMIT"
+        if state.occupancy_state == "AWAY":
+            if away_seconds >= float(settings["awayThresholdSeconds"]):
+                return "AWAY_TOO_LONG"
+            return "BELONGINGS_ONLY"
         return "NONE"
 
     def _find_seated_people(
