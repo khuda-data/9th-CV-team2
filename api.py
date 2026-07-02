@@ -448,15 +448,16 @@ def _build_app(
 
     @app.get("/api/seats/{seat_id}/snapshot")
     def get_seat_snapshot(seat_id: str):
+        if seat_id not in roi_config.seat_ids():
+            raise HTTPException(status_code=404, detail="존재하지 않는 좌석입니다.")
+
         active_entry = next(
             (entry for entry in state_store.get_status() if entry["seatId"] == seat_id),
             None,
         )
         if active_entry is None or not active_entry.get("sessionId"):
-            raise HTTPException(status_code=404, detail="현재 점유 세션 없음")
+            return {"snapshots": []}
         snaps = snapshot_store.get_by_session(active_entry["sessionId"])
-        if not snaps:
-            raise HTTPException(status_code=404, detail="현재 세션 인원 변경 스냅샷 없음")
         return {"snapshots": snaps}
 
     @app.post("/api/seats/{seat_id}/session-start")

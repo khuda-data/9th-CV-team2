@@ -330,6 +330,7 @@ class SeatStateEngine:
         window_size = int(self._settings.get("embeddingWindowSize", 5))
         if not state.embedding_window:
             state.embedding_window.append(embedding)
+            self._save_snapshot(state, crop, frame, "SESSION_STARTED", 0.0, now)
             return
 
         mean_embedding = np.mean(np.stack(state.embedding_window), axis=0)

@@ -22,7 +22,7 @@ function SnapshotReasonBadge({ reason, identityDistance }) {
   );
 }
 
-// 같은 좌석 + 같은 세션 안에서 임베딩 임계 초과 crop을 순서대로 묶는다.
+// 같은 좌석 + 같은 세션 안에서 인원 확인 crop을 순서대로 묶는다.
 // 직원이 후보 이미지를 보고 이용 타이머 기준점을 선택할 수 있게 한다.
 function groupSnapshots(persons) {
   const map = new Map();
@@ -137,7 +137,7 @@ function SnapshotModal({ onClose }) {
         onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <p className="eyebrow">임베딩 임계 초과 crop</p>
+            <p className="eyebrow">세션 시작 및 임베딩 임계 초과 crop</p>
             <h2>스냅샷 증거 ({groupCount}개 세션 · {snapshots.length}장)</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
@@ -1002,11 +1002,11 @@ export function App() {
               </div>
             )}
 
-            {/* 현재 점유 세션의 인원 변경 스냅샷 */}
+            {/* 현재 점유 세션의 인원 확인 스냅샷 */}
             {seatSnapshots.length > 0 && (
               <div style={{marginBottom:12}}>
                 <p style={{fontSize:11,color:"var(--text-secondary,#888)",marginBottom:6}}>
-                  현재 점유 중 임베딩 임계 초과 crop {seatSnapshots.length}건 — 후보를 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
+                  현재 점유 중 인원 확인 crop {seatSnapshots.length}건 — 후보를 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
                 </p>
                 <SnapshotGroupList persons={seatSnapshots} onUseAsStart={handleUseSnapshotAsStart} />
               </div>
@@ -1015,7 +1015,7 @@ export function App() {
               <div style={{marginBottom:12,height:80,background:"var(--bg-secondary,#f5f5f5)",
                 borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",
                 color:"var(--text-secondary,#aaa)",fontSize:12}}>
-                현재 점유 중 임베딩 임계 초과 없음
+                현재 점유 중 인원 확인 crop 없음
               </div>
             )}
 

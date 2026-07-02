@@ -73,7 +73,7 @@ khuda_cv/
 ├── roi_utils.py         해상도 독립 tablePolygon/seatPolygon ROI 로더
 ├── runtime_config.py    운영 정책 기본값과 PATCH 검증 규칙
 ├── event_store.py       운영 이벤트 인메모리 저장소
-├── snapshot_store.py    임베딩 임계 초과 후보/확정 crop 스냅샷 저장소
+├── snapshot_store.py    세션 시작/임베딩 임계 초과 crop 스냅샷 저장소
 ├── api.py               FastAPI REST/WebSocket/MJPEG 서버
 ├── setup_rois.py        테이블/좌석 ROI 설정 도구
 ├── cafe_cctv.mp4        입력 영상 예시
@@ -192,12 +192,12 @@ khuda_cv/
 | GET | `/api/seats` | 좌석 목록 |
 | GET | `/api/seats/layout` | ROI 위치와 영상 해상도 |
 | GET | `/api/seats/{seatId}` | 좌석 상세 |
-| GET | `/api/seats/{seatId}/snapshot` | 현재 점유 세션의 임베딩 임계 초과 crop 스냅샷 |
+| GET | `/api/seats/{seatId}/snapshot` | 현재 점유 세션의 세션 시작/임베딩 임계 초과 crop 스냅샷 |
 | POST | `/api/seats/{seatId}/session-start` | 선택한 스냅샷 시점으로 현재 세션 이용 타이머 기준점 변경 |
 | GET | `/api/seats/{seatId}/table-state` | baseline/current ROI 비교 이미지와 유사도 |
 | GET | `/api/events` | 이벤트 로그 |
 | POST | `/api/events/{eventId}/action` | 이벤트 `ACK`/`DEFER`/`RESOLVE` |
-| GET | `/api/snapshots` | 저장된 임베딩 임계 초과 crop 스냅샷 |
+| GET | `/api/snapshots` | 저장된 세션 시작/임베딩 임계 초과 crop 스냅샷 |
 | GET | `/api/settings` | 운영 정책 조회 |
 | PATCH | `/api/settings` | 운영 정책 수정 |
 | GET | `/api/video/status` | 영상 재생 상태 |
