@@ -179,7 +179,7 @@ khuda_cv/
 }
 ```
 
-이전 단일 `polygon` 형식도 읽을 수 있으며, 이 경우 같은 polygon을 테이블과 좌석 영역에 함께 사용한다.
+현재 schema는 `tablePolygon`과 `seatPolygon`을 분리해서 사용한다.
 
 ## API 명세
 
@@ -197,7 +197,7 @@ khuda_cv/
 | GET | `/api/seats/{seatId}/table-state` | baseline/current ROI 비교 이미지와 유사도 |
 | GET | `/api/events` | 이벤트 로그 |
 | POST | `/api/events/{eventId}/action` | 이벤트 `ACK`/`DEFER`/`RESOLVE` |
-| GET | `/api/gallery` | 저장된 세션/신원 변경 스냅샷 |
+| GET | `/api/snapshots` | 저장된 임베딩 임계 초과 crop 스냅샷 |
 | GET | `/api/settings` | 운영 정책 조회 |
 | PATCH | `/api/settings` | 운영 정책 수정 |
 | GET | `/api/video/status` | 영상 재생 상태 |

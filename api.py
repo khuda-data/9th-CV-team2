@@ -10,6 +10,7 @@
   POST /api/events/{eventId}/action
   GET  /api/settings
   PATCH /api/settings
+  GET  /api/snapshots
   GET  /api/cameras/main/stream
   WS   /ws/seats
 """
@@ -106,7 +107,7 @@ _EVENT_MESSAGES = {
 # ── Seat 응답 조립 ────────────────────────────────────────────────────────────
 
 def _computed_state(occ: str, alert: str) -> str:
-    """프론트엔드 단일 state 필드 (목업 호환)."""
+    """프론트엔드 단일 state 필드."""
     if occ == "EMPTY":              return "empty"
     if occ == "AWAY":               return "away"
     if alert == "OVERDUE":          return "overdue"
@@ -141,7 +142,7 @@ def _apply_seat_belongings(seat: dict, belongings: list[dict]) -> dict:
 def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
     """같은 좌석의 여러 상태 entry → 단일 API 응답으로 집계."""
     if not entries:
-        return _build_seat(seat_cfg, None)
+        return _build_empty_seat(seat_cfg)
 
     # 점유 상태: SEATED 우선
     seated_entries = [e for e in entries if e["occupancyState"] == "SEATED"]
@@ -189,57 +190,28 @@ def _aggregate_seat(seat_cfg: dict, entries: list[dict]) -> dict:
     }
 
 
-def _build_seat(seat_cfg: dict, gallery_entry: Optional[dict]) -> dict:
-    if gallery_entry is None:
-        return {
-            **seat_cfg,
-            "id":                 seat_cfg["seatId"],   # 목업 호환 alias
-            "sessionId":          None,
-            "state":              "empty",
-            "occupancyState":     "EMPTY",
-            "alertState":         "NONE",
-            "accumulatedSeconds": 0,
-            "elapsedSeconds":     0,                    # 목업 호환 alias
-            "awaySeconds":        0,
-            "personCount":        0,
-            "hasPerson":          False,
-            "hasBelongings":      False,
-            "belongings":         [],
-            "confidence":         {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0},
-            "tableChanged":       False,
-            "tableChangeScore":   0.0,
-            "tableStaticSeconds": 0,
-            "identityChangeCount": 0,
-            "identityEvidenceCount": 0,
-            "recommendation":     "",
-            "updatedAt":          _now_iso(),
-        }
-
-    occ   = gallery_entry["occupancyState"]
-    alert = gallery_entry["alertState"]
-    acc   = gallery_entry["accumulatedSeconds"]
-
+def _build_empty_seat(seat_cfg: dict) -> dict:
     return {
         **seat_cfg,
         "id":                 seat_cfg["seatId"],
-        "sessionId":          gallery_entry.get("sessionId"),
-        "state":              _computed_state(occ, alert),
-        "occupancyState":     occ,
-        "alertState":         alert,
-        "accumulatedSeconds": acc,
-        "elapsedSeconds":     acc,
-        "awaySeconds":        gallery_entry["awaySeconds"],
-        "personCount":        1,
-        "hasPerson":          gallery_entry.get("hasPerson", occ == "SEATED"),
-        "hasBelongings":      gallery_entry.get("hasBelongings", bool(gallery_entry.get("belongings"))),
-        "belongings":         gallery_entry.get("belongings", []),
-        "confidence":         gallery_entry.get("confidence", {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0}),
-        "tableChanged":       gallery_entry.get("tableChanged", False),
-        "tableChangeScore":   gallery_entry.get("tableChangeScore", 0.0),
-        "tableStaticSeconds": gallery_entry.get("tableStaticSeconds", 0),
-        "identityChangeCount": gallery_entry.get("identityChangeCount", 0),
-        "identityEvidenceCount": gallery_entry.get("identityEvidenceCount", 0),
-        "recommendation":     _RECOMMENDATIONS.get(alert, ""),
+        "sessionId":          None,
+        "state":              "empty",
+        "occupancyState":     "EMPTY",
+        "alertState":         "NONE",
+        "accumulatedSeconds": 0,
+        "elapsedSeconds":     0,
+        "awaySeconds":        0,
+        "personCount":        0,
+        "hasPerson":          False,
+        "hasBelongings":      False,
+        "belongings":         [],
+        "confidence":         {"personDetection": 0.0, "belongingsDetection": 0.0, "seatMatch": 0.0},
+        "tableChanged":       False,
+        "tableChangeScore":   0.0,
+        "tableStaticSeconds": 0,
+        "identityChangeCount": 0,
+        "identityEvidenceCount": 0,
+        "recommendation":     "",
         "updatedAt":          _now_iso(),
     }
 
@@ -426,9 +398,8 @@ def _build_app(
                     "roi": cfg["roi"],
                     "seatRoi": cfg.get("seatRoi", cfg["roi"]),
                     "tableRoi": cfg.get("tableRoi", cfg["roi"]),
-                    "polygon": cfg.get("polygon", []),
-                    "seatPolygon": cfg.get("seatPolygon", cfg.get("polygon", [])),
-                    "tablePolygon": cfg.get("tablePolygon", cfg.get("polygon", [])),
+                    "seatPolygon": cfg.get("seatPolygon", []),
+                    "tablePolygon": cfg.get("tablePolygon", []),
                 }
                 for cfg in seat_configs.values()
             ],
@@ -465,9 +436,9 @@ def _build_app(
                                                   "message": "이벤트를 찾을 수 없습니다."}})
         return {"event": result}
 
-    @app.get("/api/gallery")
-    def get_gallery():
-        return {"persons": snapshot_store.get_all()}
+    @app.get("/api/snapshots")
+    def get_snapshots():
+        return {"snapshots": snapshot_store.get_all()}
 
     @app.get("/api/seats/{seat_id}/snapshot")
     def get_seat_snapshot(seat_id: str):

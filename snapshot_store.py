@@ -90,13 +90,6 @@ def get_all() -> list[dict]:
         return sorted(_snapshots.values(), key=lambda s: s["capturedEpoch"], reverse=True)
 
 
-def get_by_seat(seat_id: str) -> list[dict]:
-    """해당 좌석에 등록된 전원 스냅샷 반환."""
-    with _lock:
-        rows = [s for s in _snapshots.values() if s["seatId"] == seat_id]
-        return sorted(rows, key=lambda s: s["capturedEpoch"], reverse=True)
-
-
 def get_by_session(session_id: str) -> list[dict]:
     with _lock:
         rows = [s for s in _snapshots.values() if s["sessionId"] == session_id]

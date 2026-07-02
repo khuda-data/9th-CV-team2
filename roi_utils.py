@@ -16,11 +16,6 @@ class SeatPolygon:
     table_polygon: list[dict[str, float]]
     seat_polygon: list[dict[str, float]]
 
-    @property
-    def polygon(self) -> list[dict[str, float]]:
-        """Legacy alias. Seat 판단용 polygon을 반환한다."""
-        return self.seat_polygon
-
 
 class RoiConfig:
     """Resolution-independent table/seat ROI configuration.
@@ -37,9 +32,7 @@ class RoiConfig:
         }]
       }
 
-    Legacy v2 shape with a single "polygon" and legacy {"1": [[x, y], ...]}
-    shape are still accepted. In those cases the same polygon is used for both
-    table and seat areas.
+    The current schema requires separate tablePolygon and seatPolygon entries.
     """
 
     def __init__(
@@ -74,20 +67,8 @@ class RoiConfig:
                 if not seat_id:
                     continue
 
-                table_polygon = _normalize_polygon(
-                    _first_polygon(raw, "tablePolygon", "table_polygon", "table", "polygon"),
-                    width,
-                    height,
-                )
-                seat_polygon = _normalize_polygon(
-                    _first_polygon(raw, "seatPolygon", "seat_polygon", "seat", "polygon"),
-                    width,
-                    height,
-                )
-                if len(table_polygon) < 3 and len(seat_polygon) >= 3:
-                    table_polygon = list(seat_polygon)
-                if len(seat_polygon) < 3 and len(table_polygon) >= 3:
-                    seat_polygon = list(table_polygon)
+                table_polygon = _normalize_polygon(raw.get("tablePolygon", []), width, height)
+                seat_polygon = _normalize_polygon(raw.get("seatPolygon", []), width, height)
                 if len(table_polygon) >= 3 and len(seat_polygon) >= 3:
                     seats.append(SeatPolygon(
                         seat_id,
@@ -97,15 +78,7 @@ class RoiConfig:
                     ))
             return cls(seats, width, height)
 
-        seats = []
-        width = max(int(source_width or 1), 1)
-        height = max(int(source_height or 1), 1)
-        if isinstance(data, dict):
-            for seat_id, points in data.items():
-                polygon = _normalize_polygon(points, width, height)
-                if len(polygon) >= 3:
-                    seats.append(SeatPolygon(str(seat_id), str(seat_id), polygon, polygon))
-        return cls(seats, width, height)
+        return cls([], source_width, source_height)
 
     def table_pixel_polygons(self, width: int, height: int) -> dict[str, np.ndarray]:
         return {
@@ -118,10 +91,6 @@ class RoiConfig:
             seat.seat_id: polygon_to_pixels(seat.seat_polygon, width, height)
             for seat in self.seats
         }
-
-    def pixel_polygons(self, width: int, height: int) -> dict[str, np.ndarray]:
-        """Legacy alias. Seat 판단용 polygon을 반환한다."""
-        return self.seat_pixel_polygons(width, height)
 
     def seat_ids(self) -> list[str]:
         return [seat.seat_id for seat in self.seats]
@@ -137,7 +106,6 @@ class RoiConfig:
                 "roi": seat_roi,
                 "seatRoi": seat_roi,
                 "tableRoi": table_roi,
-                "polygon": _round_polygon(seat.seat_polygon),
                 "seatPolygon": _round_polygon(seat.seat_polygon),
                 "tablePolygon": _round_polygon(seat.table_polygon),
             }
@@ -187,14 +155,6 @@ def bbox_from_polygon(polygon: np.ndarray) -> tuple[int, int, int, int]:
     x1, y1 = pts.min(axis=0)
     x2, y2 = pts.max(axis=0)
     return int(x1), int(y1), int(x2), int(y2)
-
-
-def _first_polygon(raw: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = raw.get(key)
-        if isinstance(value, list):
-            return value
-    return []
 
 
 def _normalize_polygon(points: Any, width: int, height: int) -> list[dict[str, float]]:

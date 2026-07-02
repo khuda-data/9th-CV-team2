@@ -373,17 +373,9 @@ class _PersonEmbedder:
     def __init__(self, reid_model: str, device: str) -> None:
         self._model = None
         try:
-            from boxmot.trackers.tracker_zoo import create_tracker, get_tracker_config
+            from boxmot.reid.core.reid import ReID
 
-            tracker = create_tracker(
-                tracker_type="botsort",
-                tracker_config=get_tracker_config("botsort"),
-                reid_weights=Path(reid_model),
-                device=device,
-                half=False,
-                per_class=False,
-            )
-            self._model = getattr(tracker, "model", None)
+            self._model = ReID(path=Path(reid_model), device=device, half=False)
         except Exception:
             self._model = None
 
@@ -392,8 +384,7 @@ class _PersonEmbedder:
             return None
         if self._model is not None:
             try:
-                resized = cv2.resize(crop, (128, 256))
-                feat = self._model(resized[np.newaxis])
+                feat = self._model([crop])
                 vec = np.asarray(feat[0], dtype=np.float32)
                 norm = np.linalg.norm(vec)
                 return vec / norm if norm > 0 else vec

@@ -64,8 +64,6 @@ class RuntimeSettings:
     def patch(self, updates: dict[str, Any]) -> dict[str, Any]:
         validated: dict[str, Any] = {}
         for key, value in updates.items():
-            if key == "seatedPersonOverlap":
-                key = "seatedPersonAnchorThreshold"
             rule = SETTING_RULES.get(key)
             if rule is None:
                 continue

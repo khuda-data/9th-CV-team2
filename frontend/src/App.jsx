@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const SNAPSHOT_REASON_META = {
-  SESSION_STARTED:   { label: "신규 등록",     tone: "gray" },
   IDENTITY_CANDIDATE:{ label: "임계 초과",     tone: "amber" },
   IDENTITY_CHANGE:   { label: "신원 변경 확정", tone: "red" },
 };
@@ -47,7 +46,7 @@ function groupSnapshots(persons) {
   return groups;
 }
 
-function GalleryGroupCard({ group, onOpenImage, onUseAsStart }) {
+function SnapshotGroupCard({ group, onOpenImage, onUseAsStart }) {
   return (
     <div style={{border:"1px solid var(--border-color,#e5e5e5)",borderRadius:10,padding:12,marginBottom:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,flexWrap:"wrap",gap:4}}>
@@ -93,7 +92,7 @@ function SnapshotGroupList({ persons, onUseAsStart }) {
     <>
       <div style={{marginTop:12}}>
         {groups.map((g) => (
-          <GalleryGroupCard
+          <SnapshotGroupCard
             key={g.key}
             group={g}
             onOpenImage={setLightbox}
@@ -118,18 +117,18 @@ function Lightbox({ src, onClose }) {
   );
 }
 
-function GalleryModal({ onClose }) {
-  const [persons, setPersons] = useState([]);
+function SnapshotModal({ onClose }) {
+  const [snapshots, setSnapshots] = useState([]);
 
   useEffect(() => {
-    apiFetch("/api/gallery").then(d => setPersons(d.persons ?? [])).catch(() => {});
+    apiFetch("/api/snapshots").then(d => setSnapshots(d.snapshots ?? [])).catch(() => {});
     const t = setInterval(() =>
-      apiFetch("/api/gallery").then(d => setPersons(d.persons ?? [])).catch(() => {})
+      apiFetch("/api/snapshots").then(d => setSnapshots(d.snapshots ?? [])).catch(() => {})
     , 3000);
     return () => clearInterval(t);
   }, []);
 
-  const groupCount = groupSnapshots(persons).length;
+  const groupCount = groupSnapshots(snapshots).length;
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
@@ -137,16 +136,16 @@ function GalleryModal({ onClose }) {
         onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <p className="eyebrow">등록 인원 — 지금 화면에 없어도 지금까지 임베딩을 뽑은 인원은 계속 보관됩니다</p>
-            <h2>현재 갤러리 ({groupCount}명 · 스냅샷 {persons.length}장)</h2>
+            <p className="eyebrow">임베딩 임계 초과 crop</p>
+            <h2>스냅샷 증거 ({groupCount}개 세션 · {snapshots.length}장)</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
             <Icon name="close" />
           </button>
         </div>
-        {persons.length === 0
-          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>등록된 인원이 없습니다.</p>
-          : <SnapshotGroupList persons={persons} />
+        {snapshots.length === 0
+          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>저장된 임계 초과 crop이 없습니다.</p>
+          : <SnapshotGroupList persons={snapshots} />
         }
       </section>
     </div>
@@ -315,9 +314,7 @@ function MetricCard({ icon, label, value, tone, helper }) {
 function SeatOverlay({ seat, selected, onSelect }) {
   const meta = STATE_META[seat.state] ?? STATE_META.empty;
   const roi  = seat.roi ?? {};
-  const seatPolygon = Array.isArray(seat.seatPolygon) && seat.seatPolygon.length >= 3
-    ? seat.seatPolygon
-    : (Array.isArray(seat.polygon) ? seat.polygon : []);
+  const seatPolygon = Array.isArray(seat.seatPolygon) ? seat.seatPolygon : [];
   const tablePolygon = Array.isArray(seat.tablePolygon) ? seat.tablePolygon : [];
   if (seatPolygon.length >= 3) {
     const clipPath = polygonToClipPath(seatPolygon);
@@ -551,7 +548,7 @@ export function App() {
   });
   const [selectedId,     setSelectedId]     = useState(null);
   const [isPolicyOpen,   setIsPolicyOpen]   = useState(false);
-  const [isGalleryOpen,  setIsGalleryOpen]  = useState(false);
+  const [isSnapshotOpen, setIsSnapshotOpen] = useState(false);
   const [connected,      setConnected]      = useState(false);
   const [now,            setNow]            = useState(new Date());
   const [seatSnapshots,  setSeatSnapshots]  = useState([]);
@@ -831,9 +828,9 @@ export function App() {
             알림 확인
             {pendingCount > 0 && <b>{pendingCount}</b>}
           </button>
-          <button type="button" className="header-button" onClick={() => setIsGalleryOpen(true)}>
-            <Icon name="gallery_thumbnail" />
-            갤러리
+          <button type="button" className="header-button" onClick={() => setIsSnapshotOpen(true)}>
+            <Icon name="photo_library" />
+            스냅샷
           </button>
           <button type="button" className="header-button" onClick={() => setIsPolicyOpen(true)}>
             <Icon name="settings" />
@@ -1086,8 +1083,8 @@ export function App() {
       {isPolicyOpen && (
         <PolicyModal policy={policy} onClose={() => setIsPolicyOpen(false)} onSave={handleSavePolicy} />
       )}
-      {isGalleryOpen && (
-        <GalleryModal onClose={() => setIsGalleryOpen(false)} />
+      {isSnapshotOpen && (
+        <SnapshotModal onClose={() => setIsSnapshotOpen(false)} />
       )}
       {lightboxSrc && (
         <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
@@ -1103,8 +1100,7 @@ function normSeats(raw) {
     ...s,
     // roi가 없으면 빈 객체 (SeatOverlay에서 방어 처리)
     roi:            s.roi ?? {},
-    polygon:        s.polygon ?? s.seatPolygon ?? [],
-    seatPolygon:    s.seatPolygon ?? s.polygon ?? [],
+    seatPolygon:    s.seatPolygon ?? [],
     tablePolygon:   s.tablePolygon ?? [],
     elapsedSeconds: s.elapsedSeconds ?? s.accumulatedSeconds ?? 0,
     belongings:     s.belongings ?? [],
