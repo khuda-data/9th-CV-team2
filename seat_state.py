@@ -34,6 +34,7 @@ class _SeatState:
     identity_candidate_count: int = 0
     identity_change_count: int = 0
     identity_evidence_count: int = 0
+    era_evidence_embeddings: list[np.ndarray] = field(default_factory=list)
 
 
 class SeatStateEngine:
@@ -255,6 +256,7 @@ class SeatStateEngine:
         state.identity_candidate_count = 0
         state.identity_change_count = 0
         state.identity_evidence_count = 0
+        state.era_evidence_embeddings = []
 
     def _clear_session(self, state: _SeatState) -> None:
         if state.session_id is not None:
@@ -271,6 +273,7 @@ class SeatStateEngine:
         state.identity_candidate_count = 0
         state.identity_change_count = 0
         state.identity_evidence_count = 0
+        state.era_evidence_embeddings = []
 
     def _compute_alert(
         self,
@@ -330,6 +333,7 @@ class SeatStateEngine:
         window_size = int(self._settings.get("embeddingWindowSize", 5))
         if not state.embedding_window:
             state.embedding_window.append(embedding)
+            self._maybe_save_evidence(state, crop, frame, embedding, now)
             return
 
         mean_embedding = np.mean(np.stack(state.embedding_window), axis=0)
@@ -338,12 +342,12 @@ class SeatStateEngine:
             state.identity_candidate_count += 1
             if state.identity_candidate_count >= int(self._settings.get("identityChangeConfirmSamples", 2)):
                 state.identity_change_count += 1
-                state.identity_evidence_count += 1
                 state.identity_candidate_count = 0
                 state.embedding_window = [embedding]
+                state.era_evidence_embeddings = []
                 self._save_snapshot(state, crop, frame, "IDENTITY_CHANGE", distance, now)
+                self._maybe_save_evidence(state, crop, frame, embedding, now)
             else:
-                state.identity_evidence_count += 1
                 self._save_snapshot(state, crop, frame, "IDENTITY_CANDIDATE", distance, now)
             return
 
@@ -351,6 +355,37 @@ class SeatStateEngine:
         state.embedding_window.append(embedding)
         if len(state.embedding_window) > window_size:
             state.embedding_window = state.embedding_window[-window_size:]
+        self._maybe_save_evidence(state, crop, frame, embedding, now)
+
+    def _maybe_save_evidence(
+        self,
+        state: _SeatState,
+        crop: np.ndarray,
+        frame: np.ndarray,
+        embedding: np.ndarray,
+        now: float,
+    ) -> None:
+        """현재 인물 구간(era)에 대해 서로 다른 각도의 기준 사진을 최대 N장 모은다.
+
+        이미 저장된 사진들과 임베딩 거리가 너무 가까우면(같은 각도 반복) 건너뛴다.
+        """
+        max_count = int(self._settings.get("identityEvidenceMaxPhotos", 5))
+        if len(state.era_evidence_embeddings) >= max_count:
+            return
+
+        nearest_distance = 0.0
+        if state.era_evidence_embeddings:
+            nearest_distance = min(
+                1.0 - _cosine_similarity(embedding, saved)
+                for saved in state.era_evidence_embeddings
+            )
+            min_distance = float(self._settings.get("identityEvidenceDiversityDistance", 0.12))
+            if nearest_distance < min_distance:
+                return
+
+        state.era_evidence_embeddings.append(embedding)
+        state.identity_evidence_count = len(state.era_evidence_embeddings)
+        self._save_snapshot(state, crop, frame, "IDENTITY_EVIDENCE", nearest_distance, now)
 
     def _save_snapshot(
         self,

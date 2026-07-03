@@ -19,6 +19,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "identityChangeDistance": 0.35,
     "identityChangeConfirmSamples": 2,
     "embeddingWindowSize": 5,
+    "identityEvidenceMaxPhotos": 5,
+    "identityEvidenceDiversityDistance": 0.12,
 }
 
 
@@ -43,6 +45,8 @@ SETTING_RULES: dict[str, SettingRule] = {
     "identityChangeDistance": SettingRule(float, 0, 2),
     "identityChangeConfirmSamples": SettingRule(int, 1, 20),
     "embeddingWindowSize": SettingRule(int, 1, 50),
+    "identityEvidenceMaxPhotos": SettingRule(int, 1, 20),
+    "identityEvidenceDiversityDistance": SettingRule(float, 0, 2),
 }
 
 

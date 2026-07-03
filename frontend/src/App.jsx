@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const SNAPSHOT_REASON_META = {
   SESSION_STARTED:   { label: "신규 등록",     tone: "gray" },
+  IDENTITY_EVIDENCE: { label: "기준 사진",     tone: "blue" },
   IDENTITY_CANDIDATE:{ label: "임계 초과",     tone: "amber" },
   IDENTITY_CHANGE:   { label: "신원 변경 확정", tone: "red" },
 };
@@ -22,8 +23,8 @@ function SnapshotReasonBadge({ reason, identityDistance }) {
   );
 }
 
-// 같은 좌석 + 같은 세션 안에서 임베딩 임계 초과 crop을 순서대로 묶는다.
-// 직원이 후보 이미지를 보고 이용 타이머 기준점을 선택할 수 있게 한다.
+// 같은 좌석 + 같은 세션 안에서 저장된 스냅샷(기준 사진/변경 후보/변경 확정)을 순서대로 묶는다.
+// 직원이 사진을 보고 이용 타이머 기준점을 선택할 수 있게 한다.
 function groupSnapshots(persons) {
   const map = new Map();
   for (const p of persons) {
@@ -137,7 +138,7 @@ function SnapshotModal({ onClose }) {
         onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <p className="eyebrow">임베딩 임계 초과 crop</p>
+            <p className="eyebrow">인물 식별 스냅샷</p>
             <h2>스냅샷 증거 ({groupCount}개 세션 · {snapshots.length}장)</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
@@ -145,9 +146,63 @@ function SnapshotModal({ onClose }) {
           </button>
         </div>
         {snapshots.length === 0
-          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>저장된 임계 초과 crop이 없습니다.</p>
+          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>저장된 스냅샷이 없습니다.</p>
           : <SnapshotGroupList persons={snapshots} />
         }
+      </section>
+    </div>
+  );
+}
+
+function EventReviewModal({ event, onClose, onConfirm, onUseAsStart }) {
+  const [snapshots, setSnapshots] = useState([]);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      apiFetch(`/api/seats/${event.seatId}/snapshot`)
+        .then(d => { if (!cancelled) setSnapshots(d.snapshots ?? []); })
+        .catch(() => { if (!cancelled) setSnapshots([]); });
+    };
+    load();
+    const t = setInterval(load, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [event.seatId]);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    try {
+      await onConfirm(event.eventId);
+      onClose();
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal" style={{maxWidth:700}} role="dialog" aria-modal="true"
+        onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">좌석 {event.seatId} · {event.title}</p>
+            <h2>알림 확인 — 기준 사진에서 실제 시작 시점을 선택하세요</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        </div>
+        <p style={{color:"var(--text-secondary,#888)",marginBottom:12}}>{event.message}</p>
+        {snapshots.length === 0
+          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>이 좌석에 저장된 스냅샷이 없습니다.</p>
+          : <SnapshotGroupList persons={snapshots} onUseAsStart={onUseAsStart} />
+        }
+        <div className="modal-actions">
+          <button type="button" className="primary-button" disabled={confirming} onClick={handleConfirm}>
+            확인 완료
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -165,13 +220,8 @@ const STATE_META = {
 };
 
 const EVENT_STATE_MAP = {
-  SESSION_STARTED: "seated",
-  NEAR_LIMIT:      "near",
   OVERDUE:         "overdue",
-  AWAY_STARTED:    "away",
   AWAY_TOO_LONG:   "away_long",
-  LEFT:            "empty",
-  BELONGINGS_ONLY: "away",
 };
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -239,6 +289,8 @@ const SETTINGS_FIELDS = [
   { key: "identityChangeDistance", label: "임베딩 변화 거리", unit: "", min: 0, max: 2, step: 0.01 },
   { key: "identityChangeConfirmSamples", label: "임베딩 변화 확인", unit: "회", min: 1, max: 20, step: 1 },
   { key: "embeddingWindowSize", label: "임베딩 평균 창", unit: "개", min: 1, max: 50, step: 1 },
+  { key: "identityEvidenceMaxPhotos", label: "증거 사진 최대 개수", unit: "장", min: 1, max: 20, step: 1 },
+  { key: "identityEvidenceDiversityDistance", label: "증거 사진 다양성 거리", unit: "", min: 0, max: 1, step: 0.01 },
 ];
 
 // ── API 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -275,14 +327,19 @@ function Icon({ name, fill = false }) {
   );
 }
 
-function MetricCard({ icon, label, value, tone, helper }) {
+function MetricCard({ icon, label, value, tone, helper, seatLabels }) {
   return (
-    <article className={`metric-card tone-${tone}`}>
+    <article className={`metric-card tone-${tone}${seatLabels ? " metric-card-wide" : ""}`}>
       <div className="metric-icon"><Icon name={icon} /></div>
       <div>
         <p>{label}</p>
         <strong>{value}</strong>
         {helper && <small>{helper}</small>}
+        {seatLabels && (
+          <span className="metric-card-seatlist">
+            {seatLabels.length > 0 ? seatLabels.join(", ") : "위반 좌석 없음"}
+          </span>
+        )}
       </div>
     </article>
   );
@@ -381,7 +438,7 @@ function SeatCard({ seat, selected, onSelect }) {
   );
 }
 
-function EventRow({ event, onConfirm }) {
+function EventRow({ event, onReview }) {
   const state     = EVENT_STATE_MAP[event.type] ?? "seated";
   const meta      = STATE_META[state] ?? STATE_META.seated;
   const confirmed = event.status !== "UNCONFIRMED";
@@ -400,7 +457,7 @@ function EventRow({ event, onConfirm }) {
       <td>{event.message}</td>
       <td className="elapsed-cell">{formatDuration(event.accumulatedSeconds)}</td>
       <td>
-        <button type="button" className="text-button" disabled={confirmed} onClick={() => onConfirm(event.eventId)}>
+        <button type="button" className="text-button" disabled={confirmed} onClick={() => onReview(event)}>
           {confirmed ? "완료" : "확인"}
         </button>
       </td>
@@ -543,6 +600,7 @@ export function App() {
   const [isPolicyOpen,   setIsPolicyOpen]   = useState(false);
   const [policyError,    setPolicyError]    = useState(null);
   const [isSnapshotOpen, setIsSnapshotOpen] = useState(false);
+  const [reviewEvent,    setReviewEvent]    = useState(null);
   const [connected,      setConnected]      = useState(false);
   const [now,            setNow]            = useState(new Date());
   const [seatSnapshots,  setSeatSnapshots]  = useState([]);
@@ -702,10 +760,10 @@ export function App() {
       .catch(() => {});
   }, [policy]);
 
-  const handleUseSnapshotAsStart = useCallback(async (snapshot) => {
-    if (!selectedId || !snapshot?.snapshotId) return;
+  const handleUseSnapshotAsStart = useCallback(async (seatId, snapshot) => {
+    if (!seatId || !snapshot?.snapshotId) return;
     try {
-      const data = await apiFetch(`/api/seats/${selectedId}/session-start`, {
+      const data = await apiFetch(`/api/seats/${seatId}/session-start`, {
         method: "POST",
         body: JSON.stringify({ snapshotId: snapshot.snapshotId }),
       });
@@ -719,7 +777,7 @@ export function App() {
     } catch (err) {
       console.error(err);
     }
-  }, [selectedId, refreshDashboard]);
+  }, [refreshDashboard]);
 
   const handleSeek = async () => {
     if (!videoStatus.isSeekable) {
@@ -780,6 +838,12 @@ export function App() {
   const selectedMeta = STATE_META[selectedSeat?.state] ?? STATE_META.empty;
   const pendingCount = events.filter((e) => e.status === "UNCONFIRMED").length;
   const emptySeats   = seats.filter((s) => s.state === "empty").map((s) => s.seatId);
+  const violatingSeats = seats.filter((s) => s.alertState === "OVERDUE" || s.alertState === "AWAY_TOO_LONG");
+  const violatingSeatLabels = violatingSeats.map((s) =>
+    s.alertState === "OVERDUE"
+      ? `${s.seatId}(시간초과)`
+      : `${s.seatId}(자리비움 ${Math.floor((s.awaySeconds || 0) / 60)}분)`
+  );
 
   useEffect(() => {
     if (!selectedId || !selectedSeat || selectedSeat.state === "empty") {
@@ -841,15 +905,8 @@ export function App() {
         <MetricCard icon="chair"    label="전체 좌석" value={seats.length}               tone="gray"  />
         <MetricCard icon="person"   label="이용 중"   value={countByState(seats,"seated")} tone="green" helper="정상 이용" />
         <MetricCard icon="work"     label="자리비움"  value={countByState(seats,"away") + countByState(seats,"away_long")}   tone="blue"  helper="테이블 변화" />
-        <MetricCard icon="timer"    label="시간초과"  value={countByState(seats,"overdue")} tone="red"   helper="추가 확인 필요" />
-        <article className="policy-summary">
-          <p>운영 정책 요약</p>
-          <div>
-            이용 제한 <strong>{formatPolicyDuration(policy.useLimitSeconds)}</strong>
-            <span />
-            자리비움 기준 <strong>{formatPolicyDuration(policy.awayThresholdSeconds)}</strong>
-          </div>
-        </article>
+        <MetricCard icon="timer"    label="주의 필요 좌석" value={violatingSeats.length} tone="red" helper="알림 로그 확인 필요"
+          seatLabels={violatingSeatLabels} />
       </section>
 
       <section className="dashboard-grid">
@@ -916,7 +973,7 @@ export function App() {
                 </thead>
                 <tbody>
                   {events.map((event) => (
-                    <EventRow key={event.eventId} event={event} onConfirm={handleConfirmEvent} />
+                    <EventRow key={event.eventId} event={event} onReview={setReviewEvent} />
                   ))}
                 </tbody>
               </table>
@@ -1006,16 +1063,16 @@ export function App() {
             {seatSnapshots.length > 0 && (
               <div style={{marginBottom:12}}>
                 <p style={{fontSize:11,color:"var(--text-secondary,#888)",marginBottom:6}}>
-                  현재 점유 중 임베딩 임계 초과 crop {seatSnapshots.length}건 — 후보를 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
+                  현재 인물 기준 사진 {seatSnapshots.length}건 — 사진을 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
                 </p>
-                <SnapshotGroupList persons={seatSnapshots} onUseAsStart={handleUseSnapshotAsStart} />
+                <SnapshotGroupList persons={seatSnapshots} onUseAsStart={(snap) => handleUseSnapshotAsStart(selectedId, snap)} />
               </div>
             )}
             {seatSnapshots.length === 0 && selectedSeat?.state !== "empty" && (
               <div style={{marginBottom:12,height:80,background:"var(--bg-secondary,#f5f5f5)",
                 borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",
                 color:"var(--text-secondary,#aaa)",fontSize:12}}>
-                현재 점유 중 임베딩 임계 초과 없음
+                현재 좌석에 저장된 기준 사진 없음
               </div>
             )}
 
@@ -1040,7 +1097,7 @@ export function App() {
               </div>
               <div><dt>테이블 변화 점수</dt><dd>{Number(selectedSeat.tableChangeScore ?? 0).toFixed(3)}</dd></div>
               <div><dt>테이블 정적 시간</dt><dd>{formatDuration(selectedSeat.tableStaticSeconds)}</dd></div>
-              <div><dt>임계 초과 crop</dt><dd>{selectedSeat.identityEvidenceCount ?? seatSnapshots.length ?? 0}건</dd></div>
+              <div><dt>기준 사진 수</dt><dd>{selectedSeat.identityEvidenceCount ?? seatSnapshots.length ?? 0}건</dd></div>
               <div><dt>확정 변경</dt><dd>{selectedSeat.identityChangeCount ?? 0}회</dd></div>
             </dl>
 
@@ -1089,6 +1146,14 @@ export function App() {
       )}
       {isSnapshotOpen && (
         <SnapshotModal onClose={() => setIsSnapshotOpen(false)} />
+      )}
+      {reviewEvent && (
+        <EventReviewModal
+          event={reviewEvent}
+          onClose={() => setReviewEvent(null)}
+          onConfirm={handleConfirmEvent}
+          onUseAsStart={(snap) => handleUseSnapshotAsStart(reviewEvent.seatId, snap)}
+        />
       )}
       {lightboxSrc && (
         <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />

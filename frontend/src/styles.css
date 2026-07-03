@@ -91,7 +91,6 @@ button:disabled {
 .brand,
 .top-actions,
 .metric-card,
-.policy-summary,
 .panel,
 .connection-pill,
 .header-button,
@@ -138,7 +137,6 @@ button:disabled {
 .brand p,
 .panel-header p,
 .metric-card p,
-.policy-summary p,
 .detail-title p,
 .policy-card p,
 .modal-note,
@@ -242,13 +240,12 @@ button:disabled {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(150px, 1fr)) minmax(300px, 1.45fr);
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) minmax(300px, 1.45fr);
   gap: 16px;
   margin: 16px 0 18px;
 }
 
-.metric-card,
-.policy-summary {
+.metric-card {
   display: flex;
   min-height: 104px;
   align-items: center;
@@ -300,34 +297,23 @@ button:disabled {
   font-weight: 700;
 }
 
-.policy-summary {
+.metric-card-wide {
+  align-items: flex-start;
+}
+
+.metric-card-wide > div {
+  min-width: 0;
+}
+
+.metric-card-seatlist {
   display: block;
-  padding: 22px 24px;
-}
-
-.policy-summary p {
-  margin-bottom: 14px;
-  font-size: 14px;
-  font-weight: 800;
-}
-
-.policy-summary div {
-  display: flex;
-  gap: 14px;
-  align-items: center;
+  margin-top: 7px;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 15px;
-}
-
-.policy-summary strong {
-  color: var(--red);
-  font-size: 18px;
-}
-
-.policy-summary div span {
-  width: 1px;
-  height: 18px;
-  background: var(--line-strong);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .dashboard-grid {
@@ -1209,7 +1195,7 @@ tbody tr:last-child td {
     grid-template-rows: auto auto auto;
   }
 
-  .policy-summary,
+  .metric-card-wide,
   .dashboard-main-column {
     grid-column: 1 / -1;
   }
@@ -1305,18 +1291,14 @@ tbody tr:last-child td {
   }
 
   .metric-grid {
-    grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(260px, 1.32fr);
+    grid-template-columns: repeat(3, minmax(120px, 1fr)) minmax(260px, 1.32fr);
     gap: 10px;
     margin: 10px 0 12px;
   }
 
-  .metric-card,
-  .policy-summary {
+  .metric-card {
     min-height: 74px;
     border-radius: 15px;
-  }
-
-  .metric-card {
     gap: 12px;
     padding: 12px 16px;
   }
@@ -1345,22 +1327,9 @@ tbody tr:last-child td {
     font-size: 11px;
   }
 
-  .policy-summary {
-    padding: 14px 18px;
-  }
-
-  .policy-summary p {
-    margin-bottom: 8px;
-    font-size: 12px;
-  }
-
-  .policy-summary div {
-    gap: 10px;
-    font-size: 13px;
-  }
-
-  .policy-summary strong {
-    font-size: 16px;
+  .metric-card-seatlist {
+    margin-top: 4px;
+    font-size: 11px;
   }
 
   .dashboard-grid {
@@ -1652,7 +1621,7 @@ tbody tr:last-child td {
     grid-template-rows: auto auto auto;
   }
 
-  .policy-summary,
+  .metric-card-wide,
   .dashboard-main-column,
   .detail-panel {
     grid-column: 1 / -1;
