@@ -116,7 +116,7 @@ def _computed_state(occ: str, alert: str) -> str:
     return "seated"
 
 
-_ALERT_PRIORITY = {"OVERDUE": 4, "NEAR_LIMIT": 3, "AWAY_TOO_LONG": 2, "BELONGINGS_ONLY": 1, "NONE": 0}
+_ALERT_PRIORITY = {"OVERDUE": 4, "AWAY_TOO_LONG": 3, "NEAR_LIMIT": 2, "BELONGINGS_ONLY": 1, "NONE": 0}
 
 
 def _merge_belongings(items: list[dict], extra_items: list[dict]) -> list[dict]:

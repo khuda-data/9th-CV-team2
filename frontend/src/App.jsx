@@ -288,7 +288,6 @@ const SETTINGS_FIELDS = [
   { key: "seatedPersonAnchorThreshold", label: "사람-좌석 앵커", unit: "", min: 0, max: 1, step: 0.1 },
   { key: "identityChangeDistance", label: "임베딩 변화 거리", unit: "", min: 0, max: 2, step: 0.01 },
   { key: "identityChangeConfirmSamples", label: "임베딩 변화 확인", unit: "회", min: 1, max: 20, step: 1 },
-  { key: "embeddingWindowSize", label: "임베딩 평균 창", unit: "개", min: 1, max: 50, step: 1 },
   { key: "identityEvidenceMaxPhotos", label: "증거 사진 최대 개수", unit: "장", min: 1, max: 20, step: 1 },
   { key: "identityEvidenceDiversityDistance", label: "증거 사진 다양성 거리", unit: "", min: 0, max: 1, step: 0.01 },
 ];

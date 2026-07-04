@@ -30,8 +30,8 @@ class _SeatState:
     has_person: bool = False
     person_confidence: float = 0.0
     seat_match: float = 0.0
-    embedding_window: list[np.ndarray] = field(default_factory=list)
     identity_candidate_count: int = 0
+    identity_stable_count: int = 0
     identity_change_count: int = 0
     identity_evidence_count: int = 0
     era_evidence_embeddings: list[np.ndarray] = field(default_factory=list)
@@ -252,8 +252,8 @@ class SeatStateEngine:
         state.session_id = f"{state.seat_id}-{int(now)}-{self._session_seq}"
         state.occupied_since = now
         state.away_since = None
-        state.embedding_window = []
         state.identity_candidate_count = 0
+        state.identity_stable_count = 0
         state.identity_change_count = 0
         state.identity_evidence_count = 0
         state.era_evidence_embeddings = []
@@ -269,8 +269,8 @@ class SeatStateEngine:
         state.has_person = False
         state.person_confidence = 0.0
         state.seat_match = 0.0
-        state.embedding_window = []
         state.identity_candidate_count = 0
+        state.identity_stable_count = 0
         state.identity_change_count = 0
         state.identity_evidence_count = 0
         state.era_evidence_embeddings = []
@@ -281,20 +281,25 @@ class SeatStateEngine:
         accumulated: float,
         away_seconds: float,
     ) -> str:
-        """표시 우선순위: 시간초과 > 마감임박 > 장기간부재/자리비움 > 없음.
+        """표시 우선순위: 시간초과 > 자리비움 장기화 > 마감임박 > 물건만 감지 > 없음.
 
-        누적 이용시간은 SEATED·AWAY 모두 흐르므로, 자리비움 중이어도 이용시간
-        초과/임박 여부를 먼저 검사한다. 자리비움 관련 알림은 그 둘 다 아닐 때만 본다.
+        누적 이용시간은 SEATED·AWAY 모두 흐르므로, 자리비움 중에 누적시간이 마감임박
+        구간에 들어가더라도 이미 자리비움 장기화로 잡힌 좌석은 계속 그 상태를 유지해야
+        "주의 필요 좌석" 카드에서 중간에 사라지지 않는다. 그래서 자리비움 중일 때는
+        자리비움 장기화 여부를 마감임박보다 먼저 검사한다. 시간초과(전체 이용시간 한도
+        초과)는 그보다도 더 심각하므로 항상 최우선이다.
         """
         settings = self._settings.snapshot()
         if accumulated >= float(settings["useLimitSeconds"]):
             return "OVERDUE"
-        if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
-            return "NEAR_LIMIT"
         if state.occupancy_state == "AWAY":
             if away_seconds >= float(settings["awayThresholdSeconds"]):
                 return "AWAY_TOO_LONG"
+            if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
+                return "NEAR_LIMIT"
             return "BELONGINGS_ONLY"
+        if accumulated >= float(settings["useLimitSeconds"]) - float(settings["nearLimitBeforeSeconds"]):
+            return "NEAR_LIMIT"
         return "NONE"
 
     def _find_seated_people(
@@ -330,20 +335,28 @@ class SeatStateEngine:
         if embedding is None:
             return
 
-        window_size = int(self._settings.get("embeddingWindowSize", 5))
-        if not state.embedding_window:
-            state.embedding_window.append(embedding)
+        if not state.era_evidence_embeddings:
+            # 이 era의 첫 프레임 — 비교 기준이 아직 없으니 그대로 기준 사진으로 저장한다.
             self._maybe_save_evidence(state, crop, frame, embedding, now)
             return
 
-        mean_embedding = np.mean(np.stack(state.embedding_window), axis=0)
-        distance = 1.0 - _cosine_similarity(embedding, mean_embedding)
+        confirm_samples = int(self._settings.get("identityChangeConfirmSamples", 2))
+        # 계속 갱신되는 이동평균(embedding_window) 대신, 다양성 필터링되어 사실상
+        # 고정되는 era_evidence_embeddings 중 가장 가까운 것과 비교한다. 점진적인
+        # 자세/의상 변화가 매 프레임 조금씩 기준선에 섞여 들어가 실제 변경을 흡수해
+        # 버리는 것을 막기 위함 — 저장된 기준 사진들과 직접 비교하면 누적 흡수 없이
+        # 원래 모습과의 실제 거리가 그대로 드러난다.
+        distance = 1.0 - max(
+            _cosine_similarity(embedding, ref) for ref in state.era_evidence_embeddings
+        )
+
         if distance >= float(self._settings.get("identityChangeDistance", 0.35)):
             state.identity_candidate_count += 1
-            if state.identity_candidate_count >= int(self._settings.get("identityChangeConfirmSamples", 2)):
+            state.identity_stable_count = 0
+            if state.identity_candidate_count >= confirm_samples:
                 state.identity_change_count += 1
                 state.identity_candidate_count = 0
-                state.embedding_window = [embedding]
+                state.identity_stable_count = 0
                 state.era_evidence_embeddings = []
                 self._save_snapshot(state, crop, frame, "IDENTITY_CHANGE", distance, now)
                 self._maybe_save_evidence(state, crop, frame, embedding, now)
@@ -351,10 +364,15 @@ class SeatStateEngine:
                 self._save_snapshot(state, crop, frame, "IDENTITY_CANDIDATE", distance, now)
             return
 
-        state.identity_candidate_count = 0
-        state.embedding_window.append(embedding)
-        if len(state.embedding_window) > window_size:
-            state.embedding_window = state.embedding_window[-window_size:]
+        # 임계값 아래로 내려온 프레임. 후보 스트릭이 진행 중이면 노이즈성 프레임 한 번만으로
+        # 바로 취소하지 않는다 — confirm_samples와 같은 횟수만큼 연속으로 낮아야 취소한다.
+        if state.identity_candidate_count > 0:
+            state.identity_stable_count += 1
+            if state.identity_stable_count < confirm_samples:
+                return
+            state.identity_candidate_count = 0
+            state.identity_stable_count = 0
+
         self._maybe_save_evidence(state, crop, frame, embedding, now)
 
     def _maybe_save_evidence(
