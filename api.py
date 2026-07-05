@@ -314,6 +314,10 @@ def _build_app(
             seats.append(seat)
         return seats
 
+    # seatId -> 이미 알림을 만든 (sessionId, alertType). 같은 손님이 머무는 동안
+    # (같은 sessionId) 같은 종류의 위반은 한 번만 알린다.
+    _notified: dict[str, tuple[Optional[str], str]] = {}
+
     def _detect_events(seats: list[dict]) -> None:
         """진짜 위반 상황(시간초과/자리비움 장기화)만 이벤트로 남긴다.
 
@@ -321,14 +325,31 @@ def _build_app(
         NEAR_LIMIT 같은 예고성 알림은 로그를 채우기만 할 뿐 실질적인 조치가 필요한
         상황이 아니므로 의도적으로 이벤트를 만들지 않는다. 좌석 자체의 alertState
         표시(카드 톤 등)는 이 함수와 무관하게 그대로 유지된다.
+
+        alertState가 바뀔 때마다 새로 알리면 안 되는 이유: 사람 인식이 순간적으로
+        흔들려서(예: 잠깐 등을 돌리거나 자세가 바뀌는 경우) AWAY_TOO_LONG이 아주
+        짧게 정상으로 돌아왔다가 다시 걸리는 일이 흔한데, 그때마다 alertState 전이로
+        보고 새 알림을 만들면 같은 손님·같은 문제에 대해 알림이 여러 개 중복으로
+        쌓인다. 그래서 "같은 세션(sessionId, 즉 같은 손님이 앉아있는 한 덩어리) 동안
+        같은 종류의 위반은 한 번만" 알리도록, 세션 단위로 이미 알렸는지를 기억한다.
+        직원이 확인(ACK)한 뒤에도 계속 같은 위반이면 다시 알리지 않고, 손님이 자리를
+        정리하고 새 손님이 앉아 새 세션이 시작되면 그때 다시 알릴 수 있다.
         """
         for s in seats:
-            sid  = s["seatId"]
-            acc  = s["accumulatedSeconds"]
-            away = s["awaySeconds"]
-            alert = s["alertState"]
+            sid        = s["seatId"]
+            acc        = s["accumulatedSeconds"]
+            away       = s["awaySeconds"]
+            alert      = s["alertState"]
+            session_id = s.get("sessionId")
 
-            # 중복 방지는 EventStore 내부에서 처리
+            if alert not in ("OVERDUE", "AWAY_TOO_LONG"):
+                continue
+
+            key = (session_id, alert)
+            if _notified.get(sid) == key:
+                continue
+            _notified[sid] = key
+
             if alert == "OVERDUE":
                 events.add(sid, "OVERDUE", acc, away,
                            _EVENT_MESSAGES["OVERDUE"](s),

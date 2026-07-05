@@ -19,6 +19,8 @@
   --text: #19130f;
   --muted: #6e6258;
   --soft: #f5f1ec;
+  --brand: #4b2f1f;
+  --brand-soft: #f1e6da;
   --green: #179c48;
   --green-soft: #eaf8ee;
   --blue: #1769d8;
@@ -44,8 +46,8 @@ body {
   min-height: 100vh;
   color: var(--text);
   background:
-    radial-gradient(circle at top left, rgba(144, 102, 56, 0.08), transparent 34rem),
-    radial-gradient(circle at top right, rgba(23, 156, 72, 0.08), transparent 30rem),
+    radial-gradient(circle at top left, rgba(144, 102, 56, 0.14), transparent 34rem),
+    radial-gradient(circle at top right, rgba(23, 156, 72, 0.09), transparent 30rem),
     var(--bg);
   -webkit-font-smoothing: antialiased;
 }
@@ -113,7 +115,7 @@ button:disabled {
   height: 52px;
   place-items: center;
   color: #fff;
-  background: #4b2f1f;
+  background: var(--brand);
   border-radius: 18px;
   box-shadow: 0 14px 30px rgba(75, 47, 31, 0.24);
 }
@@ -214,6 +216,12 @@ button:disabled {
   padding: 0 18px;
   color: var(--text);
   font-weight: 800;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.header-button:hover {
+  background: var(--brand-soft);
+  border-color: var(--line-strong);
 }
 
 .snapshot-action {
@@ -225,6 +233,12 @@ button:disabled {
   background: var(--panel-strong);
   font-size: 11px;
   font-weight: 800;
+}
+
+.snapshot-action.is-selected {
+  border-color: var(--brand);
+  color: #fff;
+  background: var(--brand);
 }
 
 .header-button b {
@@ -533,6 +547,39 @@ button:disabled {
   transform: translate(-50%, -150%);
 }
 
+/* 좌석 번호 배지를 상태색으로 채워서, 목록을 따로 확인하지 않아도 영상만
+   보고 어떤 좌석이 주의가 필요한지 바로 알 수 있게 한다. 비어있음(gray)은
+   기본 중립 스타일을 유지해 정말 신경 써야 할 좌석만 도드라지게 한다. */
+.seat-label.tone-green {
+  color: #fff;
+  background: var(--green);
+  border-color: transparent;
+}
+
+.seat-label.tone-blue {
+  color: #fff;
+  background: var(--blue);
+  border-color: transparent;
+}
+
+.seat-label.tone-amber {
+  color: #181411;
+  background: var(--amber);
+  border-color: transparent;
+}
+
+.seat-label.tone-red {
+  color: #fff;
+  background: var(--red);
+  border-color: transparent;
+}
+
+.seat-label.tone-purple {
+  color: #fff;
+  background: var(--purple);
+  border-color: transparent;
+}
+
 .seat-polygon-icon {
   position: absolute;
   display: grid;
@@ -740,6 +787,30 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.empty-row td {
+  white-space: normal;
+}
+
+.empty-log {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 0;
+  color: var(--muted);
+}
+
+.empty-log .material-symbols-rounded {
+  font-size: 28px;
+  color: var(--line-strong);
+}
+
+.empty-log p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .event-time,
 .elapsed-cell {
   font-weight: 800;
@@ -767,19 +838,36 @@ tbody tr:last-child td {
 }
 
 .text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   min-width: 48px;
   padding: 6px 10px;
-  border: 1px solid var(--line);
-  color: var(--text);
-  background: #fff;
+  border: 1px solid transparent;
+  color: #fff;
+  background: var(--brand);
   border-radius: 9px;
   font-size: 12px;
   font-weight: 800;
 }
 
+.text-button .material-symbols-rounded {
+  font-size: 15px;
+}
+
+.text-button:hover:not(:disabled) {
+  background: #3a2417;
+}
+
+/* 완료된 항목은 다시 눌러야 할 버튼처럼 보이면 안 되므로, 확인 대기 중인
+   진한 브랜드색 버튼과 확실히 구분되는 옅은 완료 표시로 바꾼다. */
 .text-button:disabled {
-  color: var(--muted);
-  background: #f4f2ef;
+  min-width: 0;
+  padding: 6px 4px;
+  border-color: transparent;
+  color: var(--green);
+  background: transparent;
+  font-weight: 900;
 }
 
 .detail-title {
@@ -870,6 +958,43 @@ tbody tr:last-child td {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.5;
+}
+
+/* CV 원본 지표(SSIM, 엣지 비교 등)는 직원이 매번 볼 필요는 없지만 검증하고
+   싶을 때는 바로 찾을 수 있어야 해서 접이식으로 뒤에 남겨둔다. */
+.evidence-details {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  padding: 4px 16px;
+}
+
+.evidence-details[open] {
+  padding-bottom: 16px;
+}
+
+.evidence-details summary {
+  padding: 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+
+.evidence-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.evidence-details summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 140ms ease;
+}
+
+.evidence-details[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .policy-card {
@@ -1059,7 +1184,11 @@ tbody tr:last-child td {
 
 .primary-button {
   color: #fff;
-  background: #19130f;
+  background: var(--brand);
+}
+
+.primary-button:hover {
+  background: #3a2417;
 }
 
 .secondary-button {
