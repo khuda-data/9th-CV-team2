@@ -208,6 +208,66 @@ function EventReviewModal({ event, onClose, onConfirm, onUseAsStart }) {
   );
 }
 
+// 시간초과/장기간 부재 좌석을 발생 순서대로 강제 팝업으로 띄운다.
+// 한 번에 하나만 보여주고, 직원이 확인을 누르면 다음 순번 좌석의 팝업으로 넘어간다.
+function AttentionAlertModal({ seat, alertType, queuePosition, queueTotal, policy, onDismiss, onUseAsStart }) {
+  const isOverdue = alertType === "OVERDUE";
+  const [snapshots, setSnapshots] = useState([]);
+
+  useEffect(() => {
+    if (!isOverdue) { setSnapshots([]); return; }
+    let cancelled = false;
+    const load = () => {
+      apiFetch(`/api/seats/${seat.seatId}/snapshot`)
+        .then(d => { if (!cancelled) setSnapshots(d.snapshots ?? []); })
+        .catch(() => { if (!cancelled) setSnapshots([]); });
+    };
+    load();
+    const t = setInterval(load, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [seat.seatId, isOverdue]);
+
+  // 임계값/경과 시간 모두 초 단위까지 보여준다 — 테스트/실운영에서 분 단위로만
+  // 반올림하면 임계값을 막 넘긴 시점에는 "00분"으로 보여 정보가 없는 것처럼 보인다.
+  const thresholdSeconds = isOverdue ? policy.useLimitSeconds : policy.awayThresholdSeconds;
+  const elapsedSeconds   = isOverdue ? seat.accumulatedSeconds : seat.awaySeconds;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal attention-modal" style={{maxWidth:700}} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div>
+            {queueTotal > 1 && (
+              <p className="eyebrow">{queuePosition}/{queueTotal}번째 확인 필요</p>
+            )}
+            <div className="attention-seat-title">
+              <span className={`status-chip tone-${isOverdue ? "red" : "purple"}`}>
+                {isOverdue ? "시간초과" : "장기간 부재"}
+              </span>
+              <h2>좌석 {seat.seatId}</h2>
+            </div>
+          </div>
+        </div>
+        <p style={{color:"var(--text-secondary,#888)",marginBottom:12}}>
+          {isOverdue
+            ? `이용 제한 시간(${formatSeatDuration(thresholdSeconds)})을 넘어 ${formatSeatDuration(elapsedSeconds)}째 이용 중입니다. 실제 시작 시점이 다르면 아래 사진에서 선택하세요.`
+            : `자리비움 기준(${formatSeatDuration(thresholdSeconds)})을 넘어 ${formatSeatDuration(elapsedSeconds)}째 자리를 비우고 있습니다. 손님 복귀 여부나 자리 정리를 확인해 주세요.`}
+        </p>
+        {isOverdue && (
+          snapshots.length === 0
+            ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>이 좌석에 저장된 스냅샷이 없습니다.</p>
+            : <SnapshotGroupList persons={snapshots} onUseAsStart={onUseAsStart} />
+        )}
+        <div className="modal-actions">
+          <button type="button" className="primary-button" onClick={onDismiss}>
+            확인 완료{queueTotal > 1 ? " · 다음 좌석 보기" : ""}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 // ── 상수 ─────────────────────────────────────────────────────────────────────
 
 const STATE_META = {
@@ -351,7 +411,7 @@ function SeatOverlay({ seat, selected, onSelect }) {
   const tablePolygon = Array.isArray(seat.tablePolygon) ? seat.tablePolygon : [];
   if (seatPolygon.length >= 3) {
     const clipPath = polygonToClipPath(seatPolygon);
-    const center = polygonCentroid(seatPolygon);
+    const center = polygonLabelAnchor(seatPolygon);
     return (
       <>
         {tablePolygon.length >= 3 && (
@@ -361,28 +421,29 @@ function SeatOverlay({ seat, selected, onSelect }) {
             aria-hidden="true"
           />
         )}
+        {/* clip-path clips descendants too, so the label/icon must live outside this
+            button or they get cut whenever the anchor point sits near the polygon edge */}
         <button
           type="button"
           className={`seat-overlay is-polygon tone-${meta.tone} ${selected ? "is-selected" : ""}`}
           style={{ clipPath }}
           onClick={() => onSelect(seat.seatId)}
           aria-label={`${seat.seatId} ${meta.label}`}
+        />
+        <span
+          className="seat-label polygon-label"
+          style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
         >
+          {seat.seatId}
+        </span>
+        {seat.state !== "empty" && (
           <span
-            className="seat-label polygon-label"
+            className={`seat-polygon-icon tone-${meta.tone}`}
             style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
           >
-            {seat.seatId}
+            <Icon name={meta.icon} />
           </span>
-          {seat.state !== "empty" && (
-            <span
-              className="seat-polygon-icon"
-              style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
-            >
-              <Icon name={meta.icon} />
-            </span>
-          )}
-        </button>
+        )}
       </>
     );
   }
@@ -410,12 +471,71 @@ function polygonToClipPath(polygon) {
   return `polygon(${points.join(", ")})`;
 }
 
-function polygonCentroid(polygon) {
+// Vertex-average "centroid" can land outside the shape for concave/irregular
+// polygons (common when different people freehand-click the seat ROI). Prefer
+// the true area centroid and fall back only if it isn't actually inside.
+function polygonLabelAnchor(polygon) {
+  const areaCentroid = polygonAreaCentroid(polygon);
+  if (areaCentroid && pointInPolygon(areaCentroid, polygon)) return areaCentroid;
+
+  const vertexAverage = polygonVertexAverage(polygon);
+  if (pointInPolygon(vertexAverage, polygon)) return vertexAverage;
+
+  return polygonBoundsCenter(polygon);
+}
+
+function polygonSignedArea(polygon) {
+  let area = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    area += Number(p1.x || 0) * Number(p2.y || 0) - Number(p2.x || 0) * Number(p1.y || 0);
+  }
+  return area / 2;
+}
+
+function polygonAreaCentroid(polygon) {
+  const area = polygonSignedArea(polygon);
+  if (Math.abs(area) < 1e-9) return null;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const x1 = Number(p1.x || 0), y1 = Number(p1.y || 0);
+    const x2 = Number(p2.x || 0), y2 = Number(p2.y || 0);
+    const cross = x1 * y2 - x2 * y1;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+  return { x: cx / (6 * area), y: cy / (6 * area) };
+}
+
+function polygonVertexAverage(polygon) {
   const sum = polygon.reduce((acc, p) => ({ x: acc.x + Number(p.x || 0), y: acc.y + Number(p.y || 0) }), { x: 0, y: 0 });
+  return { x: sum.x / polygon.length, y: sum.y / polygon.length };
+}
+
+function polygonBoundsCenter(polygon) {
+  const xs = polygon.map((p) => Number(p.x || 0));
+  const ys = polygon.map((p) => Number(p.y || 0));
   return {
-    x: sum.x / polygon.length,
-    y: sum.y / polygon.length,
+    x: (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: (Math.min(...ys) + Math.max(...ys)) / 2,
   };
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = Number(polygon[i].x || 0), yi = Number(polygon[i].y || 0);
+    const xj = Number(polygon[j].x || 0), yj = Number(polygon[j].y || 0);
+    const intersects =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
 }
 
 function SeatCard({ seat, selected, onSelect }) {
@@ -610,8 +730,10 @@ export function App() {
   const [draftSeconds,   setDraftSeconds]   = useState(0);
   const [isSeeking,      setIsSeeking]      = useState(false);
   const [streamNonce,    setStreamNonce]    = useState(0);
-  const wsRef   = useRef(null);
-  const tickRef = useRef(null);
+  const [attentionQueue, setAttentionQueue] = useState([]); // [{seatId, type, since}] 발생 순
+  const wsRef       = useRef(null);
+  const tickRef     = useRef(null);
+  const attentionRef = useRef(new Map()); // seatId -> { type, since, dismissed }
 
   // 로컬 타이머 (accumulatedSeconds 부드럽게 증가)
   useEffect(() => {
@@ -633,6 +755,51 @@ export function App() {
     }, 1000);
     return () => clearInterval(tickRef.current);
   }, []);
+
+  // 시간초과/장기간 부재로 새로 진입한 좌석을 발생 순서대로 큐에 쌓는다.
+  // 같은 상태가 유지되는 동안은 순번(since)과 확인 여부(dismissed)를 그대로 두고,
+  // 상태가 풀리면 큐에서 빠져 다음에 다시 걸릴 때 새 순번으로 등록된다.
+  useEffect(() => {
+    const map = attentionRef.current;
+    let changed = false;
+    const seenIds = new Set();
+    for (const s of seats) {
+      seenIds.add(s.seatId);
+      const alertType = (s.alertState === "OVERDUE" || s.alertState === "AWAY_TOO_LONG") ? s.alertState : null;
+      const existing = map.get(s.seatId);
+      if (alertType) {
+        if (!existing || existing.type !== alertType) {
+          map.set(s.seatId, { type: alertType, since: Date.now(), dismissed: false });
+          changed = true;
+        }
+      } else if (existing) {
+        map.delete(s.seatId);
+        changed = true;
+      }
+    }
+    for (const seatId of [...map.keys()]) {
+      if (!seenIds.has(seatId)) { map.delete(seatId); changed = true; }
+    }
+    if (changed) {
+      setAttentionQueue(
+        [...map.entries()]
+          .filter(([, v]) => !v.dismissed)
+          .sort((a, b) => a[1].since - b[1].since)
+          .map(([seatId, v]) => ({ seatId, type: v.type, since: v.since }))
+      );
+    }
+  }, [seats]);
+
+  const handleDismissAttention = useCallback((seatId) => {
+    const entry = attentionRef.current.get(seatId);
+    if (entry) entry.dismissed = true;
+    setAttentionQueue((prev) => prev.filter((a) => a.seatId !== seatId));
+    const pending = events.find((e) =>
+      e.seatId === seatId && e.status === "UNCONFIRMED" &&
+      (e.type === "OVERDUE" || e.type === "AWAY_TOO_LONG")
+    );
+    if (pending) handleConfirmEvent(pending.eventId);
+  }, [events]);
 
   // 초기 데이터 로드
   useEffect(() => {
@@ -832,6 +999,11 @@ export function App() {
     const t = setInterval(load, 3000);
     return () => { cancelled = true; clearInterval(t); };
   }, [selectedId]);
+
+  const activeAttention = attentionQueue[0] ?? null;
+  const activeAttentionSeat = activeAttention
+    ? seats.find((s) => s.seatId === activeAttention.seatId)
+    : null;
 
   const selectedSeat = seats.find((s) => s.seatId === selectedId) ?? seats[0];
   const selectedMeta = STATE_META[selectedSeat?.state] ?? STATE_META.empty;
@@ -1156,6 +1328,17 @@ export function App() {
       )}
       {lightboxSrc && (
         <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
+      {activeAttention && activeAttentionSeat && (
+        <AttentionAlertModal
+          seat={activeAttentionSeat}
+          alertType={activeAttention.type}
+          queuePosition={1}
+          queueTotal={attentionQueue.length}
+          policy={policy}
+          onDismiss={() => handleDismissAttention(activeAttention.seatId)}
+          onUseAsStart={(snap) => handleUseSnapshotAsStart(activeAttention.seatId, snap)}
+        />
       )}
     </main>
   );

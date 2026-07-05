@@ -526,6 +526,7 @@ button:disabled {
   font-weight: 900;
   line-height: 1;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
 }
 
 .polygon-label {
@@ -950,6 +951,17 @@ tbody tr:last-child td {
 
 .modal h2 {
   font-size: 24px;
+}
+
+.attention-seat-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.attention-seat-title h2 {
+  font-size: 34px;
 }
 
 .settings-modal {
