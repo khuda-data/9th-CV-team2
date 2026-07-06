@@ -137,7 +137,7 @@ khuda_cv/
 | `NEAR_LIMIT` | 누적 이용 시간이 제한 시간에 가까워짐 |
 | `OVERDUE` | 누적 이용 시간이 `useLimitSeconds` 이상 |
 
-알림 우선순위는 `OVERDUE > NEAR_LIMIT > AWAY_TOO_LONG > BELONGINGS_ONLY > NONE`이다.
+알림 우선순위는 `OVERDUE > AWAY_TOO_LONG > NEAR_LIMIT > BELONGINGS_ONLY > NONE`이다 (자리비움 중에는 자리비움 장기화가 마감임박보다 먼저 표시되어, 누적 이용시간이 마감임박 구간에 들어가도 "주의 필요 좌석" 알림이 중간에 사라지지 않는다).
 
 ## 운영 정책 기본값
 
@@ -155,9 +155,10 @@ khuda_cv/
 | `tableChangeExitThreshold` | 0.10 | 연결 구조 변화 점유 해제 기준 |
 | `tableStaticThreshold` | 0.012 | 변화 점수 안정성 표시 기준 |
 | `seatedPersonAnchorThreshold` | 0.8 | person hip/팔꿈치/손목 앵커 좌석 매칭 기준 |
-| `identityChangeDistance` | 0.35 | 임베딩 변화 후보 거리 기준 |
-| `identityChangeConfirmSamples` | 2 | 신원 변경 후보 확정 샘플 수 |
-| `embeddingWindowSize` | 5 | 임베딩 평균 창 크기 |
+| `identityChangeDistance` | 0.3 | 임베딩 변화 후보 거리 기준 (현재 era의 기준 사진들과 비교) |
+| `identityChangeConfirmSamples` | 2 | 신원 변경 후보 확정/취소에 필요한 연속 샘플 수 |
+| `identityEvidenceMaxPhotos` | 5 | 인물별 저장할 다양성 기준 사진 최대 장수 |
+| `identityEvidenceDiversityDistance` | 0.12 | 기준 사진으로 추가되기 위한 최소 임베딩 거리 |
 
 ## ROI 파일 형식
 

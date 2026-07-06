@@ -16,9 +16,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "tableChangeExitThreshold": 0.10,
     "tableStaticThreshold": 0.012,
     "seatedPersonAnchorThreshold": 0.8,
-    "identityChangeDistance": 0.35,
+    "identityChangeDistance": 0.3,
     "identityChangeConfirmSamples": 2,
-    "embeddingWindowSize": 5,
+    "identityEvidenceMaxPhotos": 5,
+    "identityEvidenceDiversityDistance": 0.12,
 }
 
 
@@ -42,7 +43,8 @@ SETTING_RULES: dict[str, SettingRule] = {
     "seatedPersonAnchorThreshold": SettingRule(float, 0, 1),
     "identityChangeDistance": SettingRule(float, 0, 2),
     "identityChangeConfirmSamples": SettingRule(int, 1, 20),
-    "embeddingWindowSize": SettingRule(int, 1, 50),
+    "identityEvidenceMaxPhotos": SettingRule(int, 1, 20),
+    "identityEvidenceDiversityDistance": SettingRule(float, 0, 2),
 }
 
 

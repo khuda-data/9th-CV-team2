@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const SNAPSHOT_REASON_META = {
   SESSION_STARTED:   { label: "신규 등록",     tone: "gray" },
+  IDENTITY_EVIDENCE: { label: "기준 사진",     tone: "blue" },
   IDENTITY_CANDIDATE:{ label: "임계 초과",     tone: "amber" },
   IDENTITY_CHANGE:   { label: "신원 변경 확정", tone: "red" },
 };
@@ -22,8 +23,8 @@ function SnapshotReasonBadge({ reason, identityDistance }) {
   );
 }
 
-// 같은 좌석 + 같은 세션 안에서 인원 확인 crop을 순서대로 묶는다.
-// 직원이 후보 이미지를 보고 이용 타이머 기준점을 선택할 수 있게 한다.
+// 같은 좌석 + 같은 세션 안에서 저장된 스냅샷(기준 사진/변경 후보/변경 확정)을 순서대로 묶는다.
+// 직원이 사진을 보고 이용 타이머 기준점을 선택할 수 있게 한다.
 function groupSnapshots(persons) {
   const map = new Map();
   for (const p of persons) {
@@ -47,7 +48,7 @@ function groupSnapshots(persons) {
   return groups;
 }
 
-function SnapshotGroupCard({ group, onOpenImage, onUseAsStart }) {
+function SnapshotGroupCard({ group, onOpenImage, onUseAsStart, selectedSnapshotId }) {
   return (
     <div style={{border:"1px solid var(--border-color,#e5e5e5)",borderRadius:10,padding:12,marginBottom:12}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,flexWrap:"wrap",gap:4}}>
@@ -70,13 +71,13 @@ function SnapshotGroupCard({ group, onOpenImage, onUseAsStart }) {
             {onUseAsStart && (
               <button
                 type="button"
-                className="snapshot-action"
+                className={`snapshot-action ${selectedSnapshotId === p.snapshotId ? "is-selected" : ""}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   onUseAsStart(p);
                 }}
               >
-                이 시점부터
+                {selectedSnapshotId === p.snapshotId ? "선택됨" : "이 시점부터"}
               </button>
             )}
           </div>
@@ -86,7 +87,7 @@ function SnapshotGroupCard({ group, onOpenImage, onUseAsStart }) {
   );
 }
 
-function SnapshotGroupList({ persons, onUseAsStart }) {
+function SnapshotGroupList({ persons, onUseAsStart, selectedSnapshotId }) {
   const [lightbox, setLightbox] = useState(null);
   const groups = groupSnapshots(persons);
   return (
@@ -98,6 +99,7 @@ function SnapshotGroupList({ persons, onUseAsStart }) {
             group={g}
             onOpenImage={setLightbox}
             onUseAsStart={onUseAsStart}
+            selectedSnapshotId={selectedSnapshotId}
           />
         ))}
       </div>
@@ -137,7 +139,7 @@ function SnapshotModal({ onClose }) {
         onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <p className="eyebrow">세션 시작 및 임베딩 임계 초과 crop</p>
+            <p className="eyebrow">인물 식별 스냅샷</p>
             <h2>스냅샷 증거 ({groupCount}개 세션 · {snapshots.length}장)</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
@@ -145,9 +147,144 @@ function SnapshotModal({ onClose }) {
           </button>
         </div>
         {snapshots.length === 0
-          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>저장된 임계 초과 crop이 없습니다.</p>
+          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>저장된 스냅샷이 없습니다.</p>
           : <SnapshotGroupList persons={snapshots} />
         }
+      </section>
+    </div>
+  );
+}
+
+function EventReviewModal({ event, onClose, onConfirm, onUseAsStart }) {
+  const [snapshots, setSnapshots] = useState([]);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      apiFetch(`/api/seats/${event.seatId}/snapshot`)
+        .then(d => { if (!cancelled) setSnapshots(d.snapshots ?? []); })
+        .catch(() => { if (!cancelled) setSnapshots([]); });
+    };
+    load();
+    const t = setInterval(load, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [event.seatId]);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    try {
+      await onConfirm(event.eventId);
+      onClose();
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal" style={{maxWidth:700}} role="dialog" aria-modal="true"
+        onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">좌석 {event.seatId} · {event.title}</p>
+            <h2>알림 확인 — 기준 사진에서 실제 시작 시점을 선택하세요</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        </div>
+        <p style={{color:"var(--text-secondary,#888)",marginBottom:12}}>{event.message}</p>
+        {snapshots.length === 0
+          ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>이 좌석에 저장된 스냅샷이 없습니다.</p>
+          : <SnapshotGroupList persons={snapshots} onUseAsStart={onUseAsStart} />
+        }
+        <div className="modal-actions">
+          <button type="button" className="primary-button" disabled={confirming} onClick={handleConfirm}>
+            확인 완료
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// 시간초과/장기간 부재 좌석을 발생 순서대로 강제 팝업으로 띄운다.
+// 한 번에 하나만 보여주고, 직원이 확인을 누르면 다음 순번 좌석의 팝업으로 넘어간다.
+function AttentionAlertModal({ seat, alertType, queuePosition, queueTotal, policy, onDismiss, onUseAsStart }) {
+  const isOverdue = alertType === "OVERDUE";
+  const [snapshots, setSnapshots] = useState([]);
+  const [selectedSnapshot, setSelectedSnapshot] = useState(null);
+  const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    if (!isOverdue) { setSnapshots([]); return; }
+    let cancelled = false;
+    const load = () => {
+      apiFetch(`/api/seats/${seat.seatId}/snapshot`)
+        .then(d => { if (!cancelled) setSnapshots(d.snapshots ?? []); })
+        .catch(() => { if (!cancelled) setSnapshots([]); });
+    };
+    load();
+    const t = setInterval(load, 3000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [seat.seatId, isOverdue]);
+
+  // 사진을 누르면 바로 적용하지 않고 "선택"만 해둔다 — 다시 누르면 선택 해제.
+  // 실제 적용은 "확인 완료"를 눌렀을 때 한 번에 일어난다.
+  const handleSelectSnapshot = (snap) => {
+    setSelectedSnapshot((prev) => (prev?.snapshotId === snap.snapshotId ? null : snap));
+  };
+
+  const handleConfirm = async () => {
+    setApplying(true);
+    try {
+      if (selectedSnapshot) {
+        await onUseAsStart(selectedSnapshot);
+      }
+      onDismiss();
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  // 임계값/경과 시간 모두 초 단위까지 보여준다 — 테스트/실운영에서 분 단위로만
+  // 반올림하면 임계값을 막 넘긴 시점에는 "00분"으로 보여 정보가 없는 것처럼 보인다.
+  const thresholdSeconds = isOverdue ? policy.useLimitSeconds : policy.awayThresholdSeconds;
+  const elapsedSeconds   = isOverdue ? seat.accumulatedSeconds : seat.awaySeconds;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal attention-modal" style={{maxWidth:700}} role="dialog" aria-modal="true">
+        <div className="modal-header">
+          <div>
+            {queueTotal > 1 && (
+              <p className="eyebrow">{queuePosition}/{queueTotal}번째 확인 필요</p>
+            )}
+            <div className="attention-seat-title">
+              <span className={`status-chip tone-${isOverdue ? "red" : "purple"}`}>
+                {isOverdue ? "시간초과" : "장기간 부재"}
+              </span>
+              <h2>좌석 {seat.seatId}</h2>
+            </div>
+          </div>
+        </div>
+        <p style={{color:"var(--text-secondary,#888)",marginBottom:12}}>
+          {isOverdue
+            ? `이용 제한 시간(${formatSeatDuration(thresholdSeconds)})을 넘어 ${formatSeatDuration(elapsedSeconds)}째 이용 중입니다. 실제 시작 시점이 다르면 아래 사진에서 선택 후 확인 완료를 누르세요.`
+            : `자리비움 기준(${formatSeatDuration(thresholdSeconds)})을 넘어 ${formatSeatDuration(elapsedSeconds)}째 자리를 비우고 있습니다. 손님 복귀 여부나 자리 정리를 확인해 주세요.`}
+        </p>
+        {isOverdue && (
+          snapshots.length === 0
+            ? <p style={{color:"var(--text-secondary,#888)",padding:"16px 0"}}>이 좌석에 저장된 스냅샷이 없습니다.</p>
+            : <SnapshotGroupList persons={snapshots} onUseAsStart={handleSelectSnapshot}
+                selectedSnapshotId={selectedSnapshot?.snapshotId} />
+        )}
+        <div className="modal-actions">
+          <button type="button" className="primary-button" onClick={handleConfirm} disabled={applying}>
+            확인 완료{queueTotal > 1 ? " · 다음 좌석 보기" : ""}
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -165,13 +302,8 @@ const STATE_META = {
 };
 
 const EVENT_STATE_MAP = {
-  SESSION_STARTED: "seated",
-  NEAR_LIMIT:      "near",
   OVERDUE:         "overdue",
-  AWAY_STARTED:    "away",
   AWAY_TOO_LONG:   "away_long",
-  LEFT:            "empty",
-  BELONGINGS_ONLY: "away",
 };
 
 // ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -238,7 +370,8 @@ const SETTINGS_FIELDS = [
   { key: "seatedPersonAnchorThreshold", label: "사람-좌석 앵커", unit: "", min: 0, max: 1, step: 0.1 },
   { key: "identityChangeDistance", label: "임베딩 변화 거리", unit: "", min: 0, max: 2, step: 0.01 },
   { key: "identityChangeConfirmSamples", label: "임베딩 변화 확인", unit: "회", min: 1, max: 20, step: 1 },
-  { key: "embeddingWindowSize", label: "임베딩 평균 창", unit: "개", min: 1, max: 50, step: 1 },
+  { key: "identityEvidenceMaxPhotos", label: "증거 사진 최대 개수", unit: "장", min: 1, max: 20, step: 1 },
+  { key: "identityEvidenceDiversityDistance", label: "증거 사진 다양성 거리", unit: "", min: 0, max: 1, step: 0.01 },
 ];
 
 // ── API 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -275,14 +408,19 @@ function Icon({ name, fill = false }) {
   );
 }
 
-function MetricCard({ icon, label, value, tone, helper }) {
+function MetricCard({ icon, label, value, tone, helper, seatLabels }) {
   return (
-    <article className={`metric-card tone-${tone}`}>
+    <article className={`metric-card tone-${tone}${seatLabels ? " metric-card-wide" : ""}`}>
       <div className="metric-icon"><Icon name={icon} /></div>
       <div>
         <p>{label}</p>
         <strong>{value}</strong>
         {helper && <small>{helper}</small>}
+        {seatLabels && (
+          <span className="metric-card-seatlist">
+            {seatLabels.length > 0 ? seatLabels.join(", ") : "위반 좌석 없음"}
+          </span>
+        )}
       </div>
     </article>
   );
@@ -295,7 +433,7 @@ function SeatOverlay({ seat, selected, onSelect }) {
   const tablePolygon = Array.isArray(seat.tablePolygon) ? seat.tablePolygon : [];
   if (seatPolygon.length >= 3) {
     const clipPath = polygonToClipPath(seatPolygon);
-    const center = polygonCentroid(seatPolygon);
+    const center = polygonLabelAnchor(seatPolygon);
     return (
       <>
         {tablePolygon.length >= 3 && (
@@ -305,28 +443,29 @@ function SeatOverlay({ seat, selected, onSelect }) {
             aria-hidden="true"
           />
         )}
+        {/* clip-path clips descendants too, so the label/icon must live outside this
+            button or they get cut whenever the anchor point sits near the polygon edge */}
         <button
           type="button"
           className={`seat-overlay is-polygon tone-${meta.tone} ${selected ? "is-selected" : ""}`}
           style={{ clipPath }}
           onClick={() => onSelect(seat.seatId)}
           aria-label={`${seat.seatId} ${meta.label}`}
+        />
+        <span
+          className={`seat-label polygon-label tone-${meta.tone}`}
+          style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
         >
+          {seat.seatId}
+        </span>
+        {seat.state !== "empty" && (
           <span
-            className="seat-label polygon-label"
+            className={`seat-polygon-icon tone-${meta.tone}`}
             style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
           >
-            {seat.seatId}
+            <Icon name={meta.icon} />
           </span>
-          {seat.state !== "empty" && (
-            <span
-              className="seat-polygon-icon"
-              style={{ left: `${center.x * 100}%`, top: `${center.y * 100}%` }}
-            >
-              <Icon name={meta.icon} />
-            </span>
-          )}
-        </button>
+        )}
       </>
     );
   }
@@ -343,7 +482,7 @@ function SeatOverlay({ seat, selected, onSelect }) {
       onClick={() => onSelect(seat.seatId)}
       aria-label={`${seat.seatId} ${meta.label}`}
     >
-      <span className="seat-label">{seat.seatId}</span>
+      <span className={`seat-label tone-${meta.tone}`}>{seat.seatId}</span>
       {seat.state !== "empty" && <Icon name={meta.icon} />}
     </button>
   );
@@ -354,12 +493,71 @@ function polygonToClipPath(polygon) {
   return `polygon(${points.join(", ")})`;
 }
 
-function polygonCentroid(polygon) {
+// Vertex-average "centroid" can land outside the shape for concave/irregular
+// polygons (common when different people freehand-click the seat ROI). Prefer
+// the true area centroid and fall back only if it isn't actually inside.
+function polygonLabelAnchor(polygon) {
+  const areaCentroid = polygonAreaCentroid(polygon);
+  if (areaCentroid && pointInPolygon(areaCentroid, polygon)) return areaCentroid;
+
+  const vertexAverage = polygonVertexAverage(polygon);
+  if (pointInPolygon(vertexAverage, polygon)) return vertexAverage;
+
+  return polygonBoundsCenter(polygon);
+}
+
+function polygonSignedArea(polygon) {
+  let area = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    area += Number(p1.x || 0) * Number(p2.y || 0) - Number(p2.x || 0) * Number(p1.y || 0);
+  }
+  return area / 2;
+}
+
+function polygonAreaCentroid(polygon) {
+  const area = polygonSignedArea(polygon);
+  if (Math.abs(area) < 1e-9) return null;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const x1 = Number(p1.x || 0), y1 = Number(p1.y || 0);
+    const x2 = Number(p2.x || 0), y2 = Number(p2.y || 0);
+    const cross = x1 * y2 - x2 * y1;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+  return { x: cx / (6 * area), y: cy / (6 * area) };
+}
+
+function polygonVertexAverage(polygon) {
   const sum = polygon.reduce((acc, p) => ({ x: acc.x + Number(p.x || 0), y: acc.y + Number(p.y || 0) }), { x: 0, y: 0 });
+  return { x: sum.x / polygon.length, y: sum.y / polygon.length };
+}
+
+function polygonBoundsCenter(polygon) {
+  const xs = polygon.map((p) => Number(p.x || 0));
+  const ys = polygon.map((p) => Number(p.y || 0));
   return {
-    x: sum.x / polygon.length,
-    y: sum.y / polygon.length,
+    x: (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: (Math.min(...ys) + Math.max(...ys)) / 2,
   };
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = Number(polygon[i].x || 0), yi = Number(polygon[i].y || 0);
+    const xj = Number(polygon[j].x || 0), yj = Number(polygon[j].y || 0);
+    const intersects =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
 }
 
 function SeatCard({ seat, selected, onSelect }) {
@@ -381,7 +579,7 @@ function SeatCard({ seat, selected, onSelect }) {
   );
 }
 
-function EventRow({ event, onConfirm }) {
+function EventRow({ event, onReview }) {
   const state     = EVENT_STATE_MAP[event.type] ?? "seated";
   const meta      = STATE_META[state] ?? STATE_META.seated;
   const confirmed = event.status !== "UNCONFIRMED";
@@ -400,8 +598,8 @@ function EventRow({ event, onConfirm }) {
       <td>{event.message}</td>
       <td className="elapsed-cell">{formatDuration(event.accumulatedSeconds)}</td>
       <td>
-        <button type="button" className="text-button" disabled={confirmed} onClick={() => onConfirm(event.eventId)}>
-          {confirmed ? "완료" : "확인"}
+        <button type="button" className="text-button" disabled={confirmed} onClick={() => onReview(event)}>
+          {confirmed ? <><Icon name="check" /> 완료</> : "확인"}
         </button>
       </td>
     </tr>
@@ -543,6 +741,7 @@ export function App() {
   const [isPolicyOpen,   setIsPolicyOpen]   = useState(false);
   const [policyError,    setPolicyError]    = useState(null);
   const [isSnapshotOpen, setIsSnapshotOpen] = useState(false);
+  const [reviewEvent,    setReviewEvent]    = useState(null);
   const [connected,      setConnected]      = useState(false);
   const [now,            setNow]            = useState(new Date());
   const [seatSnapshots,  setSeatSnapshots]  = useState([]);
@@ -553,8 +752,10 @@ export function App() {
   const [draftSeconds,   setDraftSeconds]   = useState(0);
   const [isSeeking,      setIsSeeking]      = useState(false);
   const [streamNonce,    setStreamNonce]    = useState(0);
-  const wsRef   = useRef(null);
-  const tickRef = useRef(null);
+  const [attentionQueue, setAttentionQueue] = useState([]); // [{seatId, type, since}] 발생 순
+  const wsRef       = useRef(null);
+  const tickRef     = useRef(null);
+  const attentionRef = useRef(new Map()); // seatId -> { type, since, dismissed }
 
   // 로컬 타이머 (accumulatedSeconds 부드럽게 증가)
   useEffect(() => {
@@ -576,6 +777,58 @@ export function App() {
     }, 1000);
     return () => clearInterval(tickRef.current);
   }, []);
+
+  // 좌석의 위반 이벤트가 미확인 상태로 남아있으면 확인 처리한다. 팝업을 명시적으로
+  // 닫을 때뿐 아니라, 기준 시점을 다시 골라서 상황이 저절로 해소돼 큐에서 조용히
+  // 빠질 때도 같이 불러야 한다 — 안 그러면 알림 로그에 미확인 표시가 영영 남는다.
+  const ackPendingEvent = useCallback((seatId, type) => {
+    const pending = events.find((e) =>
+      e.seatId === seatId && e.status === "UNCONFIRMED" && e.type === type
+    );
+    if (pending) handleConfirmEvent(pending.eventId);
+  }, [events]);
+
+  // 시간초과/장기간 부재로 새로 진입한 좌석을 발생 순서대로 큐에 쌓는다.
+  // 같은 상태가 유지되는 동안은 순번(since)과 확인 여부(dismissed)를 그대로 두고,
+  // 상태가 풀리면 큐에서 빠져 다음에 다시 걸릴 때 새 순번으로 등록된다.
+  useEffect(() => {
+    const map = attentionRef.current;
+    let changed = false;
+    const seenIds = new Set();
+    for (const s of seats) {
+      seenIds.add(s.seatId);
+      const alertType = (s.alertState === "OVERDUE" || s.alertState === "AWAY_TOO_LONG") ? s.alertState : null;
+      const existing = map.get(s.seatId);
+      if (alertType) {
+        if (!existing || existing.type !== alertType) {
+          map.set(s.seatId, { type: alertType, since: Date.now(), dismissed: false });
+          changed = true;
+        }
+      } else if (existing) {
+        map.delete(s.seatId);
+        changed = true;
+        ackPendingEvent(s.seatId, existing.type);
+      }
+    }
+    for (const seatId of [...map.keys()]) {
+      if (!seenIds.has(seatId)) { map.delete(seatId); changed = true; }
+    }
+    if (changed) {
+      setAttentionQueue(
+        [...map.entries()]
+          .filter(([, v]) => !v.dismissed)
+          .sort((a, b) => a[1].since - b[1].since)
+          .map(([seatId, v]) => ({ seatId, type: v.type, since: v.since }))
+      );
+    }
+  }, [seats, ackPendingEvent]);
+
+  const handleDismissAttention = useCallback((seatId) => {
+    const entry = attentionRef.current.get(seatId);
+    if (entry) entry.dismissed = true;
+    setAttentionQueue((prev) => prev.filter((a) => a.seatId !== seatId));
+    if (entry) ackPendingEvent(seatId, entry.type);
+  }, [ackPendingEvent]);
 
   // 초기 데이터 로드
   useEffect(() => {
@@ -646,7 +899,12 @@ export function App() {
           return prev.map((s, i) => (i === idx ? { ...s, ...next } : s));
         });
       } else if (msg.type === "event.created") {
-        setEvents((prev) => [msg.event, ...prev]);
+        // 재연결 시 "snapshot"이 이미 이 이벤트를 포함해서 내려온 뒤, 연결이 끊기기
+        // 전부터 대기 중이던 "event.created"가 뒤늦게 또 도착하면 같은 이벤트가
+        // 로그에 중복으로 쌓인다 — eventId가 이미 있으면 추가하지 않는다.
+        setEvents((prev) =>
+          prev.some((e) => e.eventId === msg.event.eventId) ? prev : [msg.event, ...prev]
+        );
       } else if (msg.type === "event.updated") {
         setEvents((prev) =>
           prev.map((e) => (e.eventId === msg.event.eventId ? { ...e, ...msg.event } : e))
@@ -702,10 +960,10 @@ export function App() {
       .catch(() => {});
   }, [policy]);
 
-  const handleUseSnapshotAsStart = useCallback(async (snapshot) => {
-    if (!selectedId || !snapshot?.snapshotId) return;
+  const handleUseSnapshotAsStart = useCallback(async (seatId, snapshot) => {
+    if (!seatId || !snapshot?.snapshotId) return;
     try {
-      const data = await apiFetch(`/api/seats/${selectedId}/session-start`, {
+      const data = await apiFetch(`/api/seats/${seatId}/session-start`, {
         method: "POST",
         body: JSON.stringify({ snapshotId: snapshot.snapshotId }),
       });
@@ -719,7 +977,7 @@ export function App() {
     } catch (err) {
       console.error(err);
     }
-  }, [selectedId, refreshDashboard]);
+  }, [refreshDashboard]);
 
   const handleSeek = async () => {
     if (!videoStatus.isSeekable) {
@@ -776,10 +1034,21 @@ export function App() {
     return () => { cancelled = true; clearInterval(t); };
   }, [selectedId]);
 
+  const activeAttention = attentionQueue[0] ?? null;
+  const activeAttentionSeat = activeAttention
+    ? seats.find((s) => s.seatId === activeAttention.seatId)
+    : null;
+
   const selectedSeat = seats.find((s) => s.seatId === selectedId) ?? seats[0];
   const selectedMeta = STATE_META[selectedSeat?.state] ?? STATE_META.empty;
   const pendingCount = events.filter((e) => e.status === "UNCONFIRMED").length;
   const emptySeats   = seats.filter((s) => s.state === "empty").map((s) => s.seatId);
+  const violatingSeats = seats.filter((s) => s.alertState === "OVERDUE" || s.alertState === "AWAY_TOO_LONG");
+  const violatingSeatLabels = violatingSeats.map((s) =>
+    s.alertState === "OVERDUE"
+      ? `${s.seatId}(시간초과)`
+      : `${s.seatId}(자리비움 ${Math.floor((s.awaySeconds || 0) / 60)}분)`
+  );
 
   useEffect(() => {
     if (!selectedId || !selectedSeat || selectedSeat.state === "empty") {
@@ -839,17 +1108,14 @@ export function App() {
 
       <section className="metric-grid" aria-label="좌석 상태 요약">
         <MetricCard icon="chair"    label="전체 좌석" value={seats.length}               tone="gray"  />
-        <MetricCard icon="person"   label="이용 중"   value={countByState(seats,"seated")} tone="green" helper="정상 이용" />
-        <MetricCard icon="work"     label="자리비움"  value={countByState(seats,"away") + countByState(seats,"away_long")}   tone="blue"  helper="테이블 변화" />
-        <MetricCard icon="timer"    label="시간초과"  value={countByState(seats,"overdue")} tone="red"   helper="추가 확인 필요" />
-        <article className="policy-summary">
-          <p>운영 정책 요약</p>
-          <div>
-            이용 제한 <strong>{formatPolicyDuration(policy.useLimitSeconds)}</strong>
-            <span />
-            자리비움 기준 <strong>{formatPolicyDuration(policy.awayThresholdSeconds)}</strong>
-          </div>
-        </article>
+        <MetricCard icon="person"   label="이용 중"
+          value={seats.filter((s) => s.state === "seated" || (s.state === "near" && s.occupancyState === "SEATED")).length}
+          tone="green" helper="정상 이용" />
+        <MetricCard icon="work"     label="자리비움"
+          value={seats.filter((s) => s.state === "away" || s.state === "away_long" || (s.state === "near" && s.occupancyState === "AWAY")).length}
+          tone="blue"  helper="테이블 변화" />
+        <MetricCard icon="timer"    label="주의 필요 좌석" value={violatingSeats.length} tone="red" helper="알림 로그 확인 필요"
+          seatLabels={violatingSeatLabels} />
       </section>
 
       <section className="dashboard-grid">
@@ -915,8 +1181,17 @@ export function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {events.map((event) => (
-                    <EventRow key={event.eventId} event={event} onConfirm={handleConfirmEvent} />
+                  {events.length === 0 ? (
+                    <tr className="empty-row">
+                      <td colSpan={7}>
+                        <div className="empty-log">
+                          <Icon name="local_cafe" />
+                          <p>지금은 확인이 필요한 알림이 없어요</p>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : events.map((event) => (
+                    <EventRow key={event.eventId} event={event} onReview={setReviewEvent} />
                   ))}
                 </tbody>
               </table>
@@ -961,64 +1236,24 @@ export function App() {
               <span className={`status-chip tone-${selectedMeta.tone}`}>{selectedMeta.label}</span>
             </div>
 
-            {/* 초기/현재 테이블 상태 비교 + 유사도 지표 여러 개 */}
-            {tableState && (
-              <div style={{marginBottom:12}}>
-                <p style={{fontSize:11,color:"var(--text-secondary,#888)",marginBottom:6}}>
-                  테이블 상태 비교 — 판정 기준 유사도 {(tableState.occupancySimilarity * 100).toFixed(1)}%
-                </p>
-                <div style={{display:"flex",gap:8,marginBottom:10}}>
-                  <div style={{flex:1,textAlign:"center"}}>
-                    <img src={tableState.baselineImage} alt="초기 테이블 상태"
-                      style={{width:"100%",borderRadius:6,objectFit:"cover",aspectRatio:"4/3",
-                        border:"2px solid var(--border-color,#e5e5e5)",cursor:"pointer"}}
-                      onClick={() => setLightboxSrc(tableState.baselineImage)} />
-                    <small style={{fontSize:11,color:"var(--text-secondary,#888)"}}>초기 상태</small>
-                  </div>
-                  <div style={{flex:1,textAlign:"center"}}>
-                    <img src={tableState.currentImage} alt="현재 테이블 상태"
-                      style={{width:"100%",borderRadius:6,objectFit:"cover",aspectRatio:"4/3",
-                        border:"2px solid var(--border-color,#e5e5e5)",cursor:"pointer"}}
-                      onClick={() => setLightboxSrc(tableState.currentImage)} />
-                    <small style={{fontSize:11,color:"var(--text-secondary,#888)"}}>현재 상태</small>
-                  </div>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  {(tableState.metrics ?? []).map((m) => (
-                    <div key={m.key} style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{fontSize:11,width:96,flexShrink:0,color:"var(--text-secondary,#888)"}}>
-                        {m.label}
-                      </span>
-                      <div style={{flex:1,height:6,borderRadius:3,background:"var(--bg-secondary,#eee)",overflow:"hidden"}}>
-                        <div style={{width:`${(m.similarity * 100).toFixed(1)}%`,height:"100%",
-                          background:"var(--accent-color,#4a90d9)"}} />
-                      </div>
-                      <span style={{fontSize:11,width:40,textAlign:"right"}}>
-                        {(m.similarity * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* 현재 점유 세션의 인원 확인 스냅샷 */}
+            {/* 현재 점유 세션의 인원 변경 스냅샷 */}
             {seatSnapshots.length > 0 && (
               <div style={{marginBottom:12}}>
                 <p style={{fontSize:11,color:"var(--text-secondary,#888)",marginBottom:6}}>
-                  현재 점유 중 인원 확인 crop {seatSnapshots.length}건 — 후보를 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
+                  현재 인물 기준 사진 {seatSnapshots.length}건 — 사진을 누르면 이용 타이머 기준점을 해당 시점으로 바꿉니다
                 </p>
-                <SnapshotGroupList persons={seatSnapshots} onUseAsStart={handleUseSnapshotAsStart} />
+                <SnapshotGroupList persons={seatSnapshots} onUseAsStart={(snap) => handleUseSnapshotAsStart(selectedId, snap)} />
               </div>
             )}
             {seatSnapshots.length === 0 && selectedSeat?.state !== "empty" && (
               <div style={{marginBottom:12,height:80,background:"var(--bg-secondary,#f5f5f5)",
                 borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",
                 color:"var(--text-secondary,#aaa)",fontSize:12}}>
-                현재 점유 중 인원 확인 crop 없음
+                현재 좌석에 저장된 기준 사진 없음
               </div>
             )}
 
+            {/* 직원이 바로 확인할 정보만 우선 노출 — CV 원본 지표는 아래 상세 근거에 접어둔다 */}
             <dl className="detail-list">
               <div><dt>좌석 점유 시간</dt><dd>{formatSeatDuration(selectedSeat.elapsedSeconds)}</dd></div>
               <div><dt>자리비움 경과 시간</dt><dd>{formatSeatDuration(selectedSeat.awaySeconds)}</dd></div>
@@ -1038,9 +1273,6 @@ export function App() {
                                                       "사람 탐지 + 좌석 앵커"}
                 </dd>
               </div>
-              <div><dt>테이블 변화 점수</dt><dd>{Number(selectedSeat.tableChangeScore ?? 0).toFixed(3)}</dd></div>
-              <div><dt>테이블 정적 시간</dt><dd>{formatDuration(selectedSeat.tableStaticSeconds)}</dd></div>
-              <div><dt>임계 초과 crop</dt><dd>{selectedSeat.identityEvidenceCount ?? seatSnapshots.length ?? 0}건</dd></div>
               <div><dt>확정 변경</dt><dd>{selectedSeat.identityChangeCount ?? 0}회</dd></div>
             </dl>
 
@@ -1051,6 +1283,54 @@ export function App() {
                 <p>{selectedSeat.recommendation || selectedMeta.helper}</p>
               </div>
             </div>
+
+            <details className="evidence-details">
+              <summary>판정 근거 자세히 보기</summary>
+              {tableState && (
+                <div style={{marginTop:12}}>
+                  <p style={{fontSize:11,color:"var(--text-secondary,#888)",marginBottom:6}}>
+                    테이블 상태 비교 — 판정 기준 유사도 {(tableState.occupancySimilarity * 100).toFixed(1)}%
+                  </p>
+                  <div style={{display:"flex",gap:8,marginBottom:10}}>
+                    <div style={{flex:1,textAlign:"center"}}>
+                      <img src={tableState.baselineImage} alt="초기 테이블 상태"
+                        style={{width:"100%",borderRadius:6,objectFit:"cover",aspectRatio:"4/3",
+                          border:"2px solid var(--border-color,#e5e5e5)",cursor:"pointer"}}
+                        onClick={() => setLightboxSrc(tableState.baselineImage)} />
+                      <small style={{fontSize:11,color:"var(--text-secondary,#888)"}}>초기 상태</small>
+                    </div>
+                    <div style={{flex:1,textAlign:"center"}}>
+                      <img src={tableState.currentImage} alt="현재 테이블 상태"
+                        style={{width:"100%",borderRadius:6,objectFit:"cover",aspectRatio:"4/3",
+                          border:"2px solid var(--border-color,#e5e5e5)",cursor:"pointer"}}
+                        onClick={() => setLightboxSrc(tableState.currentImage)} />
+                      <small style={{fontSize:11,color:"var(--text-secondary,#888)"}}>현재 상태</small>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    {(tableState.metrics ?? []).map((m) => (
+                      <div key={m.key} style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:11,width:96,flexShrink:0,color:"var(--text-secondary,#888)"}}>
+                          {m.label}
+                        </span>
+                        <div style={{flex:1,height:6,borderRadius:3,background:"var(--bg-secondary,#eee)",overflow:"hidden"}}>
+                          <div style={{width:`${(m.similarity * 100).toFixed(1)}%`,height:"100%",
+                            background:"var(--accent-color,#4a90d9)"}} />
+                        </div>
+                        <span style={{fontSize:11,width:40,textAlign:"right"}}>
+                          {(m.similarity * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <dl className="detail-list" style={{marginTop:12}}>
+                <div><dt>테이블 변화 점수</dt><dd>{Number(selectedSeat.tableChangeScore ?? 0).toFixed(3)}</dd></div>
+                <div><dt>테이블 정적 시간</dt><dd>{formatDuration(selectedSeat.tableStaticSeconds)}</dd></div>
+                <div><dt>기준 사진 수</dt><dd>{selectedSeat.identityEvidenceCount ?? seatSnapshots.length ?? 0}건</dd></div>
+              </dl>
+            </details>
 
             <div className="policy-card">
               <div className="panel-header compact">
@@ -1090,8 +1370,28 @@ export function App() {
       {isSnapshotOpen && (
         <SnapshotModal onClose={() => setIsSnapshotOpen(false)} />
       )}
+      {reviewEvent && (
+        <EventReviewModal
+          event={reviewEvent}
+          onClose={() => setReviewEvent(null)}
+          onConfirm={handleConfirmEvent}
+          onUseAsStart={(snap) => handleUseSnapshotAsStart(reviewEvent.seatId, snap)}
+        />
+      )}
       {lightboxSrc && (
         <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
+      {activeAttention && activeAttentionSeat && (
+        <AttentionAlertModal
+          key={activeAttention.seatId}
+          seat={activeAttentionSeat}
+          alertType={activeAttention.type}
+          queuePosition={1}
+          queueTotal={attentionQueue.length}
+          policy={policy}
+          onDismiss={() => handleDismissAttention(activeAttention.seatId)}
+          onUseAsStart={(snap) => handleUseSnapshotAsStart(activeAttention.seatId, snap)}
+        />
       )}
     </main>
   );

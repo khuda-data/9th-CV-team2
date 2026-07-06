@@ -20,23 +20,13 @@ def _now_iso() -> str:
 
 
 _SEVERITY: dict[str, str] = {
-    "SESSION_STARTED":  "INFO",
-    "NEAR_LIMIT":       "WARNING",
     "OVERDUE":          "CRITICAL",
-    "AWAY_STARTED":     "INFO",
     "AWAY_TOO_LONG":    "WARNING",
-    "LEFT":             "INFO",
-    "BELONGINGS_ONLY":  "WARNING",
 }
 
 _TITLE: dict[str, str] = {
-    "SESSION_STARTED":  "이용 시작",
-    "NEAR_LIMIT":       "이용 임박",
     "OVERDUE":          "시간초과",
-    "AWAY_STARTED":     "자리비움 시작",
     "AWAY_TOO_LONG":    "자리비움",
-    "LEFT":             "퇴석",
-    "BELONGINGS_ONLY":  "물건만 감지",
 }
 
 
